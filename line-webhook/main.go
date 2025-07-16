@@ -69,9 +69,9 @@ func getAssistantResponse(userId, message string) string {
 		threadReq := map[string]interface{}{}
 		threadPayload, _ := json.Marshal(threadReq)
 		req, _ := http.NewRequest("POST", "https://api.openai.com/v1/threads", bytes.NewReader(threadPayload))
-	   req.Header.Set("Authorization", "Bearer "+apiKey)
-	   req.Header.Set("Content-Type", "application/json")
-	   req.Header.Set("OpenAI-Beta", "assistants=v2")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("OpenAI-Beta", "assistants=v2")
 		resp, err := client.Do(req)
 		if err != nil {
 			return "Error creating thread."
@@ -100,9 +100,9 @@ func getAssistantResponse(userId, message string) string {
 	msgPayload, _ := json.Marshal(msgReq)
 	msgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
 	msgReqHttp, _ := http.NewRequest("POST", msgUrl, bytes.NewReader(msgPayload))
-	   msgReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
-	   msgReqHttp.Header.Set("Content-Type", "application/json")
-	   msgReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
+	msgReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
+	msgReqHttp.Header.Set("Content-Type", "application/json")
+	msgReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
 	msgResp, err := client.Do(msgReqHttp)
 	if err != nil {
 		return "Error sending message to thread."
@@ -123,9 +123,9 @@ func getAssistantResponse(userId, message string) string {
 	runPayload, _ := json.Marshal(runReq)
 	runUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs"
 	runReqHttp, _ := http.NewRequest("POST", runUrl, bytes.NewReader(runPayload))
-	   runReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
-	   runReqHttp.Header.Set("Content-Type", "application/json")
-	   runReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
+	runReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
+	runReqHttp.Header.Set("Content-Type", "application/json")
+	runReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
 	runResp, err := client.Do(runReqHttp)
 	if err != nil {
 		return "Error running assistant."
@@ -145,8 +145,8 @@ func getAssistantResponse(userId, message string) string {
 	for i := 0; i < 10; i++ {
 		runStatusUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID
 		runStatusReq, _ := http.NewRequest("GET", runStatusUrl, nil)
-	   runStatusReq.Header.Set("Authorization", "Bearer "+apiKey)
-	   runStatusReq.Header.Set("OpenAI-Beta", "assistants=v2")
+		runStatusReq.Header.Set("Authorization", "Bearer "+apiKey)
+		runStatusReq.Header.Set("OpenAI-Beta", "assistants=v2")
 		runStatusResp, err := client.Do(runStatusReq)
 		if err != nil {
 			return "Error polling run status."
@@ -165,30 +165,37 @@ func getAssistantResponse(userId, message string) string {
 	// Get messages (last assistant message)
 	getMsgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
 	getMsgReq, _ := http.NewRequest("GET", getMsgUrl, nil)
-	   getMsgReq.Header.Set("Authorization", "Bearer "+apiKey)
-	   getMsgReq.Header.Set("OpenAI-Beta", "assistants=v2")
+	getMsgReq.Header.Set("Authorization", "Bearer "+apiKey)
+	getMsgReq.Header.Set("OpenAI-Beta", "assistants=v2")
 	getMsgResp, err := client.Do(getMsgReq)
 	if err != nil {
 		return "Error getting messages."
 	}
 	defer getMsgResp.Body.Close()
 	body, _ = ioutil.ReadAll(getMsgResp.Body)
-	var msgList struct {
-		Data []struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"data"`
-	}
-	json.Unmarshal(body, &msgList)
-	for i := len(msgList.Data) - 1; i >= 0; i-- {
-		if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
-			return msgList.Data[i].Content[0].Text
-		}
-	}
-	return "No response from assistant."
+   var msgList struct {
+	   Data []struct {
+		   Role    string `json:"role"`
+		   Content []struct {
+			   Type string `json:"type"`
+			   Text struct {
+				   Value string `json:"value"`
+			   } `json:"text"`
+		   } `json:"content"`
+	   } `json:"data"`
+   }
+   json.Unmarshal(body, &msgList)
+   for i := len(msgList.Data) - 1; i >= 0; i-- {
+	   if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
+		   if msgList.Data[i].Content[0].Type == "text" {
+			   reply := msgList.Data[i].Content[0].Text.Value
+			   if reply != "" {
+				   return reply
+			   }
+		   }
+	   }
+   }
+   return "No response from assistant."
 }
 
 func replyToLine(replyToken, message string) {
