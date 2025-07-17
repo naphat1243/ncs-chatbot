@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -29,6 +30,11 @@ type LineEvent struct {
 var (
 	userThreadMap  = make(map[string]string)
 	userThreadLock sync.Mutex
+
+	userLastQAMap = make(map[string]struct {
+		Question string
+		Answer   string
+	})
 )
 
 func main() {
@@ -54,6 +60,14 @@ func main() {
 
 // getAssistantResponse uses OpenAI Assistants API, mapping userId to threadId in-memory
 func getAssistantResponse(userId, message string) string {
+	// Check for duplicate question
+	userThreadLock.Lock()
+	lastQA, hasLast := userLastQAMap[userId]
+	userThreadLock.Unlock()
+	if hasLast && lastQA.Question == message {
+		return "You already asked this question."
+	}
+
 	apiKey := os.Getenv("CHATGPT_API_KEY")
 	if apiKey == "" {
 		return "OpenAI API key not configured."
@@ -142,7 +156,7 @@ func getAssistantResponse(userId, message string) string {
 	}
 
 	// Poll run status and get response
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		runStatusUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID
 		runStatusReq, _ := http.NewRequest("GET", runStatusUrl, nil)
 		runStatusReq.Header.Set("Authorization", "Bearer "+apiKey)
@@ -157,6 +171,7 @@ func getAssistantResponse(userId, message string) string {
 			Status string `json:"status"`
 		}
 		json.Unmarshal(statusBody, &statusObj)
+		fmt.Println("Run status:", statusObj.Status)
 		if statusObj.Status == "completed" {
 			break
 		}
@@ -173,32 +188,44 @@ func getAssistantResponse(userId, message string) string {
 	}
 	defer getMsgResp.Body.Close()
 	body, _ = ioutil.ReadAll(getMsgResp.Body)
-   var msgList struct {
-	   Data []struct {
-		   Role    string `json:"role"`
-		   Content []struct {
-			   Type string `json:"type"`
-			   Text struct {
-				   Value string `json:"value"`
-			   } `json:"text"`
-		   } `json:"content"`
-	   } `json:"data"`
-   }
-   json.Unmarshal(body, &msgList)
-   for i := len(msgList.Data) - 1; i >= 0; i-- {
-	   if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
-		   if msgList.Data[i].Content[0].Type == "text" {
-			   reply := msgList.Data[i].Content[0].Text.Value
-			   if reply != "" {
-				   return reply
-			   }
-		   }
-	   }
-   }
-   return "No response from assistant."
+	var msgList struct {
+		Data []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text struct {
+					Value string `json:"value"`
+				} `json:"text"`
+			} `json:"content"`
+		} `json:"data"`
+	}
+	json.Unmarshal(body, &msgList)
+	for i := 0; i < len(msgList.Data); i++ {
+		if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
+			if msgList.Data[i].Content[0].Type == "text" {
+				reply := msgList.Data[i].Content[0].Text.Value
+				if reply != "" {
+					// Store last Q&A
+					userThreadLock.Lock()
+					userLastQAMap[userId] = struct {
+						Question string
+						Answer   string
+					}{Question: message, Answer: reply}
+					userThreadLock.Unlock()
+					fmt.Println(reply)
+					return reply
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func replyToLine(replyToken, message string) {
+	if message == "" {
+		log.Println("No message to reply.")
+		return
+	}
 	lineReplyURL := "https://api.line.me/v2/bot/message/reply"
 	channelToken := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
 	if channelToken == "" {
