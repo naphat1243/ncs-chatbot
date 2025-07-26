@@ -107,10 +107,25 @@ func getAssistantResponse(userId, message string) string {
 		userThreadLock.Unlock()
 	}
 
-	// Add message to thread
+	// Get current time in Asia/Bangkok
+	timeResp, err := http.Get("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Bangkok")
+	var timeStr string
+	if err == nil {
+		defer timeResp.Body.Close()
+		timeBody, _ := ioutil.ReadAll(timeResp.Body)
+		var timeObj struct {
+			DateTime string `json:"dateTime"`
+		}
+		json.Unmarshal(timeBody, &timeObj)
+		if timeObj.DateTime != "" {
+			timeStr = timeObj.DateTime
+		}
+	}
+
+	// Add message to thread (with current time for GPT)
 	msgReq := map[string]interface{}{
 		"role":    "user",
-		"content": message,
+		"content": fmt.Sprintf("ขณะนี้เวลา %s: %s", timeStr, message),
 	}
 	msgPayload, _ := json.Marshal(msgReq)
 	msgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
