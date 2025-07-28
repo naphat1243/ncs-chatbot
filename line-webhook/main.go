@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -36,6 +37,9 @@ var (
 		Question string
 		Answer   string
 	})
+
+	userMsgBuffer = make(map[string][]string) // buffer for each user
+	userMsgTimer  = make(map[string]*time.Timer)
 )
 
 func main() {
@@ -49,8 +53,28 @@ func main() {
 		for _, e := range event.Events {
 			if e.Type == "message" && e.Message.Type == "text" {
 				userId := e.Source.UserID
-				responseText := getAssistantResponse(userId, e.Message.Text)
-				replyToLine(e.ReplyToken, responseText)
+				userThreadLock.Lock()
+				userMsgBuffer[userId] = append(userMsgBuffer[userId], e.Message.Text)
+				if timer, ok := userMsgTimer[userId]; ok {
+					timer.Stop()
+				}
+				t := time.AfterFunc(10*time.Second, func() {
+					userThreadLock.Lock()
+					msgs := userMsgBuffer[userId]
+					userMsgBuffer[userId] = nil
+					userThreadLock.Unlock()
+					if len(msgs) == 0 {
+						return
+					}
+					summary := msgs[0]
+					if len(msgs) > 1 {
+						summary = "สรุปคำถามลูกค้า: " + fmt.Sprintf("%v", msgs)
+					}
+					responseText := getAssistantResponse(userId, summary)
+					replyToLine(e.ReplyToken, responseText)
+				})
+				userMsgTimer[userId] = t
+				userThreadLock.Unlock()
 			}
 		}
 		return c.SendStatus(fiber.StatusOK)
