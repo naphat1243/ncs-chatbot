@@ -253,6 +253,28 @@ func getAssistantResponse(userId, message string) string {
 						submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
 						client.Do(submitReq)
 					}
+				} else if call.Function.Name == "get_ncs_pricing" {
+					var argStr string
+					json.Unmarshal(call.Function.Arguments, &argStr)
+					var args struct {
+						ServiceType  string `json:"service_type"`
+						ItemType     string `json:"item_type"`
+						Size         string `json:"size"`
+						CustomerType string `json:"customer_type"`
+						PackageType  string `json:"package_type"`
+						Quantity     int    `json:"quantity"`
+					}
+					json.Unmarshal([]byte(argStr), &args)
+
+					result := getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
+					toolOutputs := []map[string]interface{}{{"tool_call_id": call.ID, "output": result}}
+					toolOutputsJson, _ := json.Marshal(map[string]interface{}{"tool_outputs": toolOutputs})
+					submitUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID + "/submit_tool_outputs"
+					submitReq, _ := http.NewRequest("POST", submitUrl, bytes.NewReader(toolOutputsJson))
+					submitReq.Header.Set("Authorization", "Bearer "+apiKey)
+					submitReq.Header.Set("Content-Type", "application/json")
+					submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
+					client.Do(submitReq)
 				}
 			}
 		}
@@ -426,6 +448,116 @@ func getAssistantResponse(userId, message string) string {
 		}
 	}
 	return ""
+}
+
+// getNCSPricing returns pricing information for NCS cleaning services
+func getNCSPricing(serviceType, itemType, size, customerType, packageType string, quantity int) string {
+	// New Customer Regular Pricing
+	if customerType == "new" || customerType == "" {
+		if serviceType == "disinfection" || serviceType == "กำจัดเชื้อโรค" {
+			switch itemType {
+			case "mattress", "ที่นอน":
+				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
+					return "ที่นอน 3-3.5ฟุต บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 1,990 บาท, ลด 35% = 1,290 บาท, ลด 50% = 995 บาท"
+				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
+					return "ที่นอน 5-6ฟุต บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 2,390 บาท, ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท"
+				}
+			case "sofa", "โซฟา":
+				switch size {
+				case "chair", "เก้าอี้":
+					return "เก้าอี้ บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 450 บาท, ลด 35% = 295 บาท, ลด 50% = 225 บาท"
+				case "1seat", "1ที่นั่ง":
+					return "โซฟา 1ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 990 บาท, ลด 35% = 650 บาท, ลด 50% = 495 บาท"
+				case "2seat", "2ที่นั่ง":
+					return "โซฟา 2ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 1,690 บาท, ลด 35% = 1,100 บาท, ลด 50% = 845 บาท"
+				case "3seat", "3ที่นั่ง":
+					return "โซฟา 3ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 2,390 บาท, ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท"
+				}
+			}
+		} else if serviceType == "washing" || serviceType == "ซักขจัดคราบ" {
+			switch itemType {
+			case "mattress", "ที่นอน":
+				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
+					return "ที่นอน 3-3.5ฟุต บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,500 บาท, ลด 35% = 1,590 บาท, ลด 50% = 1,250 บาท"
+				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
+					return "ที่นอน 5-6ฟุต บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,790 บาท, ลด 35% = 1,790 บาท, ลด 50% = 1,395 บาท"
+				}
+			case "sofa", "โซฟา":
+				switch size {
+				case "chair", "เก้าอี้":
+					return "เก้าอี้ บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 990 บาท, ลด 35% = 650 บาท, ลด 50% = 495 บาท"
+				case "1seat", "1ที่นั่ง":
+					return "โซฟา 1ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 1,690 บาท, ลด 35% = 1,100 บาท, ลด 50% = 845 บาท"
+				case "2seat", "2ที่นั่ง":
+					return "โซฟา 2ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,390 บาท, ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท"
+				case "3seat", "3ที่นั่ง":
+					return "โซฟา 3ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 3,090 บาท, ลด 35% = 1,990 บาท, ลด 50% = 1,545 บาท"
+				}
+			}
+		}
+	}
+
+	// Package Pricing - Coupon Packages
+	if packageType == "coupon" || packageType == "คูปอง" {
+		if serviceType == "disinfection" || serviceType == "กำจัดเชื้อโรค" {
+			switch quantity {
+			case 5:
+				return "แพคเพจคูปอง 5 ใบ บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 12,950 บาท, ส่วนลด 7,460 บาท, ราคาขาย 5,490 บาท (เฉลี่ย 1,098 บาท/ใบ)"
+			case 10:
+				return "แพคเพจคูปอง 10 ใบ บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 25,900 บาท, ส่วนลด 16,000 บาท, ราคาขาย 9,900 บาท (เฉลี่ย 990 บาท/ใบ)"
+			case 20:
+				return "แพคเพจคูปอง 20 ใบ บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 51,800 บาท, ส่วนลด 32,800 บาท, ราคาขาย 19,000 บาท (เฉลี่ย 950 บาท/ใบ)"
+			}
+		} else if serviceType == "washing" || serviceType == "ซักขจัดคราบ" {
+			switch quantity {
+			case 5:
+				return "แพคเพจคูปอง 5 ใบ บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 13,500 บาท, ส่วนลด 6,550 บาท, ราคาขาย 6,950 บาท (เฉลี่ย 1,390 บาท/ใบ)"
+			case 10:
+				return "แพคเพจคูปอง 10 ใบ บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 27,000 บาท, ส่วนลด 14,100 บาท, ราคาขาย 12,900 บาท (เฉลี่ย 1,290 บาท/ใบ)"
+			}
+		}
+	}
+
+	// Contract/Annual Package Pricing
+	if packageType == "contract" || packageType == "สัญญา" {
+		if serviceType == "disinfection" || serviceType == "กำจัดเชื้อโรค" {
+			switch quantity {
+			case 2:
+				return "สัญญา 2 ชิ้น บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 4,780 บาท, ส่วนลด 2,090 บาท, ราคาขาย 2,690 บาท (เฉลี่ย 1,345 บาท/ชิ้น) มัดจำขั้นต่ำ 1,000 บาท"
+			case 3:
+				return "สัญญา 3 ชิ้น บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 7,170 บาท, ส่วนลด 3,520 บาท, ราคาขาย 3,850 บาท (เฉลี่ย 1,283 บาท/ชิ้น) มัดจำขั้นต่ำ 1,000 บาท"
+			case 4:
+				return "สัญญา 4 ชิ้น บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 9,560 บาท, ส่วนลด 4,870 บาท, ราคาขาย 4,690 บาท (เฉลี่ย 1,173 บาท/ชิ้น) มัดจำขั้นต่ำ 1,000 บาท"
+			case 5:
+				return "สัญญา 5 ชิ้น บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 11,950 บาท, ส่วนลด 6,860 บาท, ราคาขาย 5,450 บาท (เฉลี่ย 1,090 บาท/ชิ้น) มัดจำขั้นต่ำ 1,000 บาท"
+			}
+		}
+	}
+
+	// Member Pricing
+	if customerType == "member" || customerType == "เมมเบอร์" {
+		if serviceType == "disinfection" || serviceType == "กำจัดเชื้อโรค" {
+			switch itemType {
+			case "mattress", "ที่นอน":
+				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
+					return "ที่นอน 3-3.5ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 1,990 บาท, ราคาลด 50% = 995 บาท"
+				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
+					return "ที่นอน 5-6ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 2,390 บาท, ราคาลด 50% = 1,195 บาท"
+				}
+			}
+		} else if serviceType == "washing" || serviceType == "ซักขจัดคราบ" {
+			switch itemType {
+			case "mattress", "ที่นอน":
+				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
+					return "ที่นอน 3-3.5ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 2,500 บาท, ราคาลด 50% = 1,250 บาท"
+				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
+					return "ที่นอน 5-6ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 2,790 บาท, ราคาลด 50% = 1,395 บาท"
+				}
+			}
+		}
+	}
+
+	return "ขออภัย ไม่พบข้อมูลราคาสำหรับบริการที่ระบุ กรุณาติดต่อเจ้าหน้าที่เพื่อสอบถามราคาเพิ่มเติม หรือระบุรายละเอียดให้ชัดเจนมากขึ้น เช่น ประเภทบริการ (กำจัดเชื้อโรค หรือ ซักขจัดคราบ), ประเภทสินค้า (ที่นอน/โซฟา), ขนาด, และประเภทลูกค้า"
 }
 
 func replyToLine(replyToken, message string) {
