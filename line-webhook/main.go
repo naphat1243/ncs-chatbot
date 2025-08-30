@@ -436,6 +436,8 @@ func getAssistantResponse(userId, message string) string {
 	log.Printf("Assistant run started with ID: %s, initial status: %s", runRespObj.ID, runRespObj.Status)
 
 	// Poll run status and get response waiting 60 sec
+	var lastToolCallSignature string
+	var submittedToolOutputs bool
 	for i := 0; i < 60; i++ {
 		runStatusUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID
 		runStatusReq, _ := http.NewRequest("GET", runStatusUrl, nil)
@@ -445,8 +447,8 @@ func getAssistantResponse(userId, message string) string {
 		if err != nil {
 			return "Error polling run status."
 		}
-		defer runStatusResp.Body.Close()
 		statusBody, _ := io.ReadAll(runStatusResp.Body)
+		runStatusResp.Body.Close()
 		var statusObj struct {
 			Status         string `json:"status"`
 			RequiredAction struct {
@@ -473,89 +475,82 @@ func getAssistantResponse(userId, message string) string {
 
 		// --- เช็ค required_action.submit_tool_outputs.tool_calls ใน /runs ---
 		if statusObj.RequiredAction.Type == "submit_tool_outputs" && len(statusObj.RequiredAction.SubmitToolOutputs.ToolCalls) > 0 {
+			// Build a signature of current tool call IDs to detect duplicates
+			var ids []string
+			for _, c := range statusObj.RequiredAction.SubmitToolOutputs.ToolCalls {
+				ids = append(ids, c.ID)
+			}
+			currentSignature := strings.Join(ids, ",")
+			if currentSignature == lastToolCallSignature && submittedToolOutputs {
+				// Already submitted these tool outputs; wait for assistant to process
+				log.Printf("Tool outputs already submitted for signature %s; waiting...", currentSignature)
+				time.Sleep(800 * time.Millisecond)
+				continue
+			}
+			var aggregatedOutputs []map[string]interface{}
 			for _, call := range statusObj.RequiredAction.SubmitToolOutputs.ToolCalls {
 				log.Printf("Processing function call: %s", call.Function.Name)
 
 				if call.Function.Name == "get_available_slots_with_months" {
 					log.Printf("get_available_slots_with_months called with arguments: %s", string(call.Function.Arguments))
-
-					// Fix argument parsing - handle direct JSON structure
 					var args struct {
 						ThaiMonthYear string `json:"thai_month_year"`
 					}
-
-					// Try direct unmarshal first
-					err := json.Unmarshal(call.Function.Arguments, &args)
-					if err != nil {
-						log.Printf("Direct unmarshal failed, trying string unmarshal: %v", err)
-						// Try the double unmarshal approach
+					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
 						var argStr string
 						json.Unmarshal(call.Function.Arguments, &argStr)
 						json.Unmarshal([]byte(argStr), &args)
 					}
-
-					log.Printf("Parsed month: '%s'", args.ThaiMonthYear)
-
 					if args.ThaiMonthYear != "" {
 						gsUrl := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + url.QueryEscape(args.ThaiMonthYear)
-						log.Printf("Calling Google Apps Script: %s", gsUrl)
-
 						resp, err := http.Get(gsUrl)
 						if err != nil {
-							log.Printf("Error calling Google Apps Script: %v", err)
-							return "Error calling Google Apps Script."
-						}
-						defer resp.Body.Close()
-						gsBody, _ := io.ReadAll(resp.Body)
-						result := string(gsBody)
-
-						log.Printf("Google Apps Script response: %s", result)
-
-						toolOutputs := []map[string]interface{}{{"tool_call_id": call.ID, "output": result}}
-						toolOutputsJson, _ := json.Marshal(map[string]interface{}{"tool_outputs": toolOutputs})
-						submitUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID + "/submit_tool_outputs"
-
-						log.Printf("Submitting tool outputs to: %s", submitUrl)
-
-						submitReq, _ := http.NewRequest("POST", submitUrl, bytes.NewReader(toolOutputsJson))
-						submitReq.Header.Set("Authorization", "Bearer "+apiKey)
-						submitReq.Header.Set("Content-Type", "application/json")
-						submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
-
-						submitResp, err := client.Do(submitReq)
-						if err != nil {
-							log.Printf("Error submitting tool outputs: %v", err)
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error calling Google Apps Script."})
 						} else {
-							log.Printf("Tool outputs submitted successfully, status: %d", submitResp.StatusCode)
-							submitResp.Body.Close()
+							bodySlots, _ := io.ReadAll(resp.Body)
+							resp.Body.Close()
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": string(bodySlots)})
 						}
 					} else {
-						log.Printf("Empty month parameter received")
+						aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "ไม่พบเดือน"})
 					}
 				} else if call.Function.Name == "get_ncs_pricing" {
 					var argStr string
 					json.Unmarshal(call.Function.Arguments, &argStr)
 					var args struct {
-						ServiceType  string `json:"service_type"`
-						ItemType     string `json:"item_type"`
-						Size         string `json:"size"`
-						CustomerType string `json:"customer_type"`
-						PackageType  string `json:"package_type"`
-						Quantity     int    `json:"quantity"`
+						ServiceType, ItemType, Size, CustomerType, PackageType string
+						Quantity                                               int
 					}
 					json.Unmarshal([]byte(argStr), &args)
-
 					result := getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
-					toolOutputs := []map[string]interface{}{{"tool_call_id": call.ID, "output": result}}
-					toolOutputsJson, _ := json.Marshal(map[string]interface{}{"tool_outputs": toolOutputs})
-					submitUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID + "/submit_tool_outputs"
-					submitReq, _ := http.NewRequest("POST", submitUrl, bytes.NewReader(toolOutputsJson))
-					submitReq.Header.Set("Authorization", "Bearer "+apiKey)
-					submitReq.Header.Set("Content-Type", "application/json")
-					submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
-					client.Do(submitReq)
+					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
 				}
 			}
+			if len(aggregatedOutputs) > 0 {
+				payload, _ := json.Marshal(map[string]interface{}{"tool_outputs": aggregatedOutputs})
+				submitUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID + "/submit_tool_outputs"
+				submitReq, _ := http.NewRequest("POST", submitUrl, bytes.NewReader(payload))
+				submitReq.Header.Set("Authorization", "Bearer "+apiKey)
+				submitReq.Header.Set("Content-Type", "application/json")
+				submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
+				resp, err := client.Do(submitReq)
+				if err != nil {
+					log.Printf("Error submitting aggregated tool outputs: %v", err)
+				} else {
+					bodySubmit, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					log.Printf("Submitted %d tool outputs. Status: %d Body: %s", len(aggregatedOutputs), resp.StatusCode, string(bodySubmit))
+				}
+				lastToolCallSignature = currentSignature
+				submittedToolOutputs = true
+				// Small delay to allow run state update
+				time.Sleep(700 * time.Millisecond)
+				continue
+			}
+		}
+		// Reset flag if run moved past requires_action
+		if statusObj.Status != "requires_action" {
+			submittedToolOutputs = false
 		}
 		if statusObj.Status == "completed" {
 			break
