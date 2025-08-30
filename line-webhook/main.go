@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -25,6 +26,7 @@ type LineEvent struct {
 		Message struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
+			ID   string `json:"id"`
 		} `json:"message"`
 	} `json:"events"`
 }
@@ -51,10 +53,28 @@ func main() {
 			return c.SendStatus(fiber.StatusBadRequest)
 		}
 		for _, e := range event.Events {
-			if e.Type == "message" && e.Message.Type == "text" {
+			if e.Type == "message" {
 				userId := e.Source.UserID
+				var messageContent string
+
+				if e.Message.Type == "text" {
+					messageContent = e.Message.Text
+				} else if e.Message.Type == "image" {
+					// Handle image message
+					imageURL, err := getLineImageURL(e.Message.ID)
+					if err != nil {
+						log.Println("Error getting image URL:", err)
+						messageContent = "ได้รับรูปภาพจากลูกค้า (ไม่สามารถแสดงได้)"
+					} else {
+						messageContent = "ลูกค้าส่งรูปภาพ: " + imageURL
+					}
+				} else {
+					// Skip other message types
+					continue
+				}
+
 				userThreadLock.Lock()
-				userMsgBuffer[userId] = append(userMsgBuffer[userId], e.Message.Text)
+				userMsgBuffer[userId] = append(userMsgBuffer[userId], messageContent)
 				if timer, ok := userMsgTimer[userId]; ok {
 					timer.Stop()
 				}
@@ -81,6 +101,49 @@ func main() {
 	})
 
 	log.Fatal(app.Listen(":8080"))
+}
+
+// getLineImageURL gets the image URL from LINE and converts it to a base64 data URL for GPT vision
+func getLineImageURL(messageID string) (string, error) {
+	channelToken := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
+	if channelToken == "" {
+		return "", fmt.Errorf("LINE channel access token not set")
+	}
+
+	// Get image content from LINE
+	imageURL := "https://api-data.line.me/v2/bot/message/" + messageID + "/content"
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+channelToken)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("failed to get image: %s", resp.Status)
+	}
+
+	// Read image data
+	imageData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading image data: %v", err)
+	}
+
+	// Get content type or default to image/jpeg
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+
+	// Convert to base64 data URL for GPT-4 Vision
+	base64Data := base64.StdEncoding.EncodeToString(imageData)
+	return fmt.Sprintf("data:%s;base64,%s", contentType, base64Data), nil
 }
 
 // getAssistantResponse uses OpenAI Assistants API, mapping userId to threadId in-memory
@@ -116,7 +179,7 @@ func getAssistantResponse(userId, message string) string {
 			return "Error creating thread."
 		}
 		defer resp.Body.Close()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		var threadResp struct {
 			ID string `json:"id"`
 		}
@@ -136,7 +199,7 @@ func getAssistantResponse(userId, message string) string {
 	var timeStr string
 	if err == nil {
 		defer timeResp.Body.Close()
-		timeBody, _ := ioutil.ReadAll(timeResp.Body)
+		timeBody, _ := io.ReadAll(timeResp.Body)
 		var timeObj struct {
 			DateTime string `json:"dateTime"`
 		}
@@ -147,10 +210,35 @@ func getAssistantResponse(userId, message string) string {
 	}
 
 	// Add message to thread (with current time for GPT)
-	msgReq := map[string]interface{}{
-		"role":    "user",
-		"content": fmt.Sprintf("ขณะนี้เวลา %s: %s", timeStr, message),
+	var msgReq map[string]interface{}
+
+	// Check if message contains image URL
+	if len(message) > 20 && (message[:15] == "ลูกค้าส่งรูปภาพ: " || message[:15] == "ลูกค้าส่งรูปภาพ:") {
+		// Handle image message with vision
+		imageURL := message[15:] // Extract URL after "ลูกค้าส่งรูปภาพ: "
+		msgReq = map[string]interface{}{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": fmt.Sprintf("ขณะนี้เวลา %s: ลูกค้าส่งรูปภาพมา กรุณาวิเคราะห์รูปภาพและให้คำแนะนำเกี่ยวกับบริการทำความสะอาดที่เหมาะสม", timeStr),
+				},
+				{
+					"type": "image_url",
+					"image_url": map[string]string{
+						"url": imageURL,
+					},
+				},
+			},
+		}
+	} else {
+		// Handle text message
+		msgReq = map[string]interface{}{
+			"role":    "user",
+			"content": fmt.Sprintf("ขณะนี้เวลา %s: %s", timeStr, message),
+		}
 	}
+
 	msgPayload, _ := json.Marshal(msgReq)
 	msgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
 	msgReqHttp, _ := http.NewRequest("POST", msgUrl, bytes.NewReader(msgPayload))
@@ -162,7 +250,7 @@ func getAssistantResponse(userId, message string) string {
 		return "Error sending message to thread."
 	}
 	defer msgResp.Body.Close()
-	body, _ := ioutil.ReadAll(msgResp.Body)
+	body, _ := io.ReadAll(msgResp.Body)
 	var msgRespObj map[string]interface{}
 	json.Unmarshal(body, &msgRespObj)
 
@@ -185,7 +273,7 @@ func getAssistantResponse(userId, message string) string {
 		return "Error running assistant."
 	}
 	defer runResp.Body.Close()
-	body, _ = ioutil.ReadAll(runResp.Body)
+	body, _ = io.ReadAll(runResp.Body)
 	var runRespObj struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
@@ -195,8 +283,8 @@ func getAssistantResponse(userId, message string) string {
 		return "Failed to start run."
 	}
 
-	// Poll run status and get response
-	for i := 0; i < 20; i++ {
+	// Poll run status and get response waiting 60 sec
+	for i := 0; i < 60; i++ {
 		runStatusUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID
 		runStatusReq, _ := http.NewRequest("GET", runStatusUrl, nil)
 		runStatusReq.Header.Set("Authorization", "Bearer "+apiKey)
@@ -206,7 +294,7 @@ func getAssistantResponse(userId, message string) string {
 			return "Error polling run status."
 		}
 		defer runStatusResp.Body.Close()
-		statusBody, _ := ioutil.ReadAll(runStatusResp.Body)
+		statusBody, _ := io.ReadAll(runStatusResp.Body)
 		var statusObj struct {
 			Status         string `json:"status"`
 			RequiredAction struct {
@@ -242,7 +330,7 @@ func getAssistantResponse(userId, message string) string {
 							return "Error calling Google Apps Script."
 						}
 						defer resp.Body.Close()
-						gsBody, _ := ioutil.ReadAll(resp.Body)
+						gsBody, _ := io.ReadAll(resp.Body)
 						result := string(gsBody)
 						toolOutputs := []map[string]interface{}{{"tool_call_id": call.ID, "output": result}}
 						toolOutputsJson, _ := json.Marshal(map[string]interface{}{"tool_outputs": toolOutputs})
@@ -293,7 +381,7 @@ func getAssistantResponse(userId, message string) string {
 		return "Error getting messages."
 	}
 	defer getMsgResp.Body.Close()
-	body, _ = ioutil.ReadAll(getMsgResp.Body)
+	body, _ = io.ReadAll(getMsgResp.Body)
 	var msgList struct {
 		Data []struct {
 			Role    string `json:"role"`
@@ -349,7 +437,7 @@ func getAssistantResponse(userId, message string) string {
 								return "Error calling Google Apps Script."
 							}
 							defer resp.Body.Close()
-							gsBody, _ := ioutil.ReadAll(resp.Body)
+							gsBody, _ := io.ReadAll(resp.Body)
 							result := string(gsBody)
 
 							// ส่งข้อมูลวันว่างกลับไปให้ GPT เพื่อสรุปให้ลูกค้า
@@ -368,7 +456,7 @@ func getAssistantResponse(userId, message string) string {
 								return "Error sending slot info to GPT."
 							}
 							defer msgResp.Body.Close()
-							_, _ = ioutil.ReadAll(msgResp.Body)
+							_, _ = io.ReadAll(msgResp.Body)
 
 							// Run assistant อีกรอบ
 							runReq := map[string]interface{}{
@@ -385,7 +473,7 @@ func getAssistantResponse(userId, message string) string {
 								return "Error running assistant for slot summary."
 							}
 							defer runResp.Body.Close()
-							_, _ = ioutil.ReadAll(runResp.Body)
+							_, _ = io.ReadAll(runResp.Body)
 
 							// Poll run status
 							for j := 0; j < 20; j++ {
@@ -398,7 +486,7 @@ func getAssistantResponse(userId, message string) string {
 									return "Error polling run status for slot summary."
 								}
 								defer runStatusResp.Body.Close()
-								statusBody, _ := ioutil.ReadAll(runStatusResp.Body)
+								statusBody, _ := io.ReadAll(runStatusResp.Body)
 								var statusObj2 struct {
 									Status string `json:"status"`
 								}
@@ -418,7 +506,7 @@ func getAssistantResponse(userId, message string) string {
 								return "Error getting slot summary from GPT."
 							}
 							defer getMsgResp.Body.Close()
-							body, _ := ioutil.ReadAll(getMsgResp.Body)
+							body, _ := io.ReadAll(getMsgResp.Body)
 							var slotMsgList struct {
 								Data []struct {
 									Role    string `json:"role"`
@@ -580,7 +668,7 @@ func replyToLine(replyToken, message string) {
 	}
 	jsonPayload, _ := json.Marshal(payload)
 	client := &http.Client{}
-	req, _ := http.NewRequest("POST", lineReplyURL, ioutil.NopCloser(bytes.NewReader(jsonPayload)))
+	req, _ := http.NewRequest("POST", lineReplyURL, io.NopCloser(bytes.NewReader(jsonPayload)))
 	req.Header.Set("Authorization", "Bearer "+channelToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
@@ -590,7 +678,7 @@ func replyToLine(replyToken, message string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		log.Println("LINE reply error:", string(body))
 	}
 }
