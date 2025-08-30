@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -165,22 +166,58 @@ func getLineImageURL(messageID string) (string, error) {
 	return fmt.Sprintf("data:%s;base64,%s", contentType, base64Data), nil
 }
 
-// getAssistantResponse uses OpenAI Assistants API, mapping userId to threadId in-memory
+// isErrorResponse checks if a response is an error message that shouldn't be cached
+func isErrorResponse(response string) bool {
+	errorKeywords := []string{
+		"Error ",
+		"Failed to ",
+		"not configured",
+		"not set",
+		"Error creating",
+		"Error running",
+		"Error sending",
+		"Error getting",
+		"Error calling",
+		"ขออภัย ระบบมีปัญหา", // Our user-friendly error messages
+		"เกิดข้อผิดพลาด",
+		"ไม่สามารถ",    // Unable to
+		"พบข้อผิดพลาด", // Found error
+	}
+
+	for _, keyword := range errorKeywords {
+		if strings.Contains(response, keyword) {
+			return true
+		}
+	}
+
+	// Also check if response is empty or too short to be useful
+	if len(strings.TrimSpace(response)) < 10 {
+		return true
+	}
+
+	return false
+} // getAssistantResponse uses OpenAI Assistants API, mapping userId to threadId in-memory
 func getAssistantResponse(userId, message string) string {
 	log.Printf("getAssistantResponse called for user %s with message: %s", userId, message)
 
-	// Check for duplicate question
+	// Check for duplicate question - return previous answer to save costs
 	userThreadLock.Lock()
 	lastQA, hasLast := userLastQAMap[userId]
 	userThreadLock.Unlock()
-	if hasLast && lastQA.Question == message {
-		log.Printf("Duplicate question detected for user %s", userId)
-		return "You already asked this question."
+	if hasLast && lastQA.Question == message && lastQA.Answer != "" {
+		// Only return cached answer if it's not an error message
+		if !isErrorResponse(lastQA.Answer) {
+			log.Printf("Duplicate question detected for user %s, returning cached answer", userId)
+			return lastQA.Answer
+		} else {
+			log.Printf("Cached response is an error, will generate new response for user %s", userId)
+		}
 	}
 
 	apiKey := os.Getenv("CHATGPT_API_KEY")
 	if apiKey == "" {
-		return "OpenAI API key not configured."
+		log.Printf("OpenAI API key not configured for user %s", userId)
+		return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้งหรือติดต่อเจ้าหน้าที่"
 	}
 	client := &http.Client{}
 
@@ -198,7 +235,8 @@ func getAssistantResponse(userId, message string) string {
 		req.Header.Set("OpenAI-Beta", "assistants=v2")
 		resp, err := client.Do(req)
 		if err != nil {
-			return "Error creating thread."
+			log.Printf("Error creating thread for user %s: %v", userId, err)
+			return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง"
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
@@ -285,6 +323,42 @@ func getAssistantResponse(userId, message string) string {
 
 	log.Printf("Running assistant %s on thread %s", assistantId, threadId)
 
+	// Check for active runs first and cancel them if needed
+	listRunsUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs"
+	listRunsReq, _ := http.NewRequest("GET", listRunsUrl, nil)
+	listRunsReq.Header.Set("Authorization", "Bearer "+apiKey)
+	listRunsReq.Header.Set("OpenAI-Beta", "assistants=v2")
+	listRunsResp, err := client.Do(listRunsReq)
+	if err == nil {
+		defer listRunsResp.Body.Close()
+		listRunsBody, _ := io.ReadAll(listRunsResp.Body)
+		var listRunsObj struct {
+			Data []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"data"`
+		}
+		json.Unmarshal(listRunsBody, &listRunsObj)
+
+		// Cancel any active runs
+		for _, run := range listRunsObj.Data {
+			if run.Status == "in_progress" || run.Status == "requires_action" {
+				log.Printf("Found active run %s with status %s, cancelling it", run.ID, run.Status)
+				cancelUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + run.ID + "/cancel"
+				cancelReq, _ := http.NewRequest("POST", cancelUrl, nil)
+				cancelReq.Header.Set("Authorization", "Bearer "+apiKey)
+				cancelReq.Header.Set("OpenAI-Beta", "assistants=v2")
+				cancelResp, err := client.Do(cancelReq)
+				if err == nil {
+					defer cancelResp.Body.Close()
+					log.Printf("Cancelled run %s", run.ID)
+				} else {
+					log.Printf("Failed to cancel run %s: %v", run.ID, err)
+				}
+			}
+		}
+	}
+
 	runReq := map[string]interface{}{
 		"assistant_id": assistantId,
 	}
@@ -307,8 +381,53 @@ func getAssistantResponse(userId, message string) string {
 	var runRespObj struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
+		Error  struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
 	}
 	json.Unmarshal(body, &runRespObj)
+
+	// If there's an error about active run, try to handle it
+	if runRespObj.Error.Type == "invalid_request_error" && runRespObj.ID == "" {
+		log.Printf("Run creation failed with error: %s", runRespObj.Error.Message)
+
+		// Try to extract run ID from error message and cancel it
+		if strings.Contains(runRespObj.Error.Message, "already has an active run") {
+			// Extract run ID from error message like "run_O1YyJLu1c08K603vr1kelKJb"
+			words := strings.Fields(runRespObj.Error.Message)
+			for _, word := range words {
+				if strings.HasPrefix(word, "run_") {
+					runId := strings.TrimSuffix(word, ".")
+					log.Printf("Attempting to cancel active run: %s", runId)
+
+					cancelUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runId + "/cancel"
+					cancelReq, _ := http.NewRequest("POST", cancelUrl, nil)
+					cancelReq.Header.Set("Authorization", "Bearer "+apiKey)
+					cancelReq.Header.Set("OpenAI-Beta", "assistants=v2")
+					cancelResp, err := client.Do(cancelReq)
+					if err == nil {
+						defer cancelResp.Body.Close()
+						log.Printf("Successfully cancelled run %s", runId)
+
+						// Wait a moment and try creating the run again
+						time.Sleep(2 * time.Second)
+
+						// Retry creating the run
+						runResp2, err := client.Do(runReqHttp)
+						if err == nil {
+							defer runResp2.Body.Close()
+							body2, _ := io.ReadAll(runResp2.Body)
+							log.Printf("Retry run response: %s", string(body2))
+							json.Unmarshal(body2, &runRespObj)
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
 	if runRespObj.ID == "" {
 		log.Printf("Failed to start run. Response: %s", string(body))
 		return "Failed to start run."
@@ -470,14 +589,20 @@ func getAssistantResponse(userId, message string) string {
 		if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
 			if msgList.Data[i].Content[0].Type == "text" {
 				reply := msgList.Data[i].Content[0].Text.Value
-				if reply != "" {
-					// Store last Q&A
+				if reply != "" && !isErrorResponse(reply) {
+					// Only store successful responses, not error messages
 					userThreadLock.Lock()
 					userLastQAMap[userId] = struct {
 						Question string
 						Answer   string
 					}{Question: message, Answer: reply}
 					userThreadLock.Unlock()
+					log.Printf("Cached successful response for user %s", userId)
+					fmt.Println(reply)
+					return reply
+				} else if reply != "" {
+					// Return error response but don't cache it
+					log.Printf("Not caching error response for user %s", userId)
 					fmt.Println(reply)
 					return reply
 				}
@@ -635,6 +760,17 @@ func getNCSPricing(serviceType, itemType, size, customerType, packageType string
 					return "โซฟา 2ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 1,690 บาท, ลด 35% = 1,100 บาท, ลด 50% = 845 บาท"
 				case "3seat", "3ที่นั่ง":
 					return "โซฟา 3ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 2,390 บาท, ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท"
+				case "4seat", "4ที่นั่ง":
+					return "โซฟา 4ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 3,090 บาท, ลด 35% = 1,990 บาท, ลด 50% = 1,545 บาท"
+				case "5seat", "5ที่นั่ง":
+					return "โซฟา 5ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 3,790 บาท, ลด 35% = 2,490 บาท, ลด 50% = 1,895 บาท"
+				case "6seat", "6ที่นั่ง":
+					return "โซฟา 6ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 4,490 บาท, ลด 35% = 2,900 บาท, ลด 50% = 2,245 บาท"
+				}
+			case "curtain", "ม่าน", "carpet", "พรม", "ม่าน/พรม":
+				// Support per square meter queries for disinfection
+				if size == "sqm" || size == "ตรม" || size == "ตร.ม." || size == "ตารางเมตร" || size == "ตารางเมตร(ตรม.)" || size == "ต่อ 1 ตรม" || size == "ต่อ1ตรม" || size == "per_sqm" || size == "per_sqm_disinfection" || size == "1sqm" {
+					return "ม่าน/พรม ต่อ 1 ตร.ม. บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 150 บาท, ลด 35% = 95 บาท, ลด 50% = 75 บาท"
 				}
 			}
 		} else if serviceType == "washing" || serviceType == "ซักขจัดคราบ" {
@@ -655,6 +791,16 @@ func getNCSPricing(serviceType, itemType, size, customerType, packageType string
 					return "โซฟา 2ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,390 บาท, ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท"
 				case "3seat", "3ที่นั่ง":
 					return "โซฟา 3ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 3,090 บาท, ลด 35% = 1,990 บาท, ลด 50% = 1,545 บาท"
+				case "4seat", "4ที่นั่ง":
+					return "โซฟา 4ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 3,790 บาท, ลด 35% = 2,490 บาท, ลด 50% = 1,895 บาท"
+				case "5seat", "5ที่นั่ง":
+					return "โซฟา 5ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 4,490 บาท, ลด 35% = 2,900 บาท, ลด 50% = 2,245 บาท"
+				case "6seat", "6ที่นั่ง":
+					return "โซฟา 6ที่นั่ง บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 5,190 บาท, ลด 35% = 3,350 บาท, ลด 50% = 2,595 บาท"
+				}
+			case "curtain", "ม่าน", "carpet", "พรม", "ม่าน/พรม":
+				if size == "sqm" || size == "ตรม" || size == "ตร.ม." || size == "ตารางเมตร" || size == "ตารางเมตร(ตรม.)" || size == "ต่อ 1 ตรม" || size == "ต่อ1ตรม" || size == "per_sqm" || size == "1sqm" {
+					return "ม่าน/พรม ต่อ 1 ตร.ม. บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 700 บาท, ลด 35% = 450 บาท, ลด 50% = 350 บาท"
 				}
 			}
 		}
@@ -698,23 +844,65 @@ func getNCSPricing(serviceType, itemType, size, customerType, packageType string
 	}
 
 	// Member Pricing
-	if customerType == "member" || customerType == "เมมเบอร์" {
+	if customerType == "member" || customerType == "เมมเบอร์" || customerType == "สมาชิก" || strings.Contains(strings.ToLower(customerType), "member") {
 		if serviceType == "disinfection" || serviceType == "กำจัดเชื้อโรค" {
 			switch itemType {
 			case "mattress", "ที่นอน":
 				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
-					return "ที่นอน 3-3.5ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 1,990 บาท, ราคาลด 50% = 995 บาท"
+					return "ที่นอน 3-3.5ฟุต สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 1,990 บาท, ราคาลด 50% = 995 บาท"
 				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
-					return "ที่นอน 5-6ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 2,390 บาท, ราคาลด 50% = 1,195 บาท"
+					return "ที่นอน 5-6ฟุต สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 2,390 บาท, ราคาลด 50% = 1,195 บาท"
+				}
+			case "sofa", "โซฟา":
+				switch size {
+				case "chair", "เก้าอี้":
+					return "เก้าอี้ สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 450 บาท, ราคาลด 50% = 225 บาท"
+				case "1seat", "1ที่นั่ง":
+					return "โซฟา 1ที่นั่ง สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 990 บาท, ราคาลด 50% = 495 บาท"
+				case "2seat", "2ที่นั่ง":
+					return "โซฟา 2ที่นั่ง สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 1,690 บาท, ราคาลด 50% = 845 บาท"
+				case "3seat", "3ที่นั่ง":
+					return "โซฟา 3ที่นั่ง สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 2,390 บาท, ราคาลด 50% = 1,195 บาท"
+				case "4seat", "4ที่นั่ง":
+					return "โซฟา 4ที่นั่ง สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 3,090 บาท, ราคาลด 50% = 1,545 บาท"
+				case "5seat", "5ที่นั่ง":
+					return "โซฟา 5ที่นั่ง สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 3,790 บาท, ราคาลด 50% = 1,895 บาท"
+				case "6seat", "6ที่นั่ง":
+					return "โซฟา 6ที่นั่ง สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 4,490 บาท, ราคาลด 50% = 2,245 บาท"
+				}
+			case "curtain", "ม่าน", "carpet", "พรม", "ม่าน/พรม":
+				if size == "sqm" || size == "ตรม" || size == "ตร.ม." || size == "ตารางเมตร" || size == "per_sqm" || size == "1sqm" {
+					return "ม่าน/พรม ต่อ 1 ตร.ม. สำหรับสมาชิก NCS Family Member บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 150 บาท, ราคาลด 50% = 75 บาท"
 				}
 			}
 		} else if serviceType == "washing" || serviceType == "ซักขจัดคราบ" {
 			switch itemType {
 			case "mattress", "ที่นอน":
 				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
-					return "ที่นอน 3-3.5ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 2,500 บาท, ราคาลด 50% = 1,250 บาท"
+					return "ที่นอน 3-3.5ฟุต สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,500 บาท, ราคาลด 50% = 1,250 บาท"
 				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
-					return "ที่นอน 5-6ฟุต สำหรับสมาชิก NCS Family Member: ราคาเต็ม 2,790 บาท, ราคาลด 50% = 1,395 บาท"
+					return "ที่นอน 5-6ฟุต สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,790 บาท, ราคาลด 50% = 1,395 บาท"
+				}
+			case "sofa", "โซฟา":
+				switch size {
+				case "chair", "เก้าอี้":
+					return "เก้าอี้ สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 990 บาท, ราคาลด 50% = 495 บาท"
+				case "1seat", "1ที่นั่ง":
+					return "โซฟา 1ที่นั่ง สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 1,690 บาท, ราคาลด 50% = 845 บาท"
+				case "2seat", "2ที่นั่ง":
+					return "โซฟา 2ที่นั่ง สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 2,390 บาท, ราคาลด 50% = 1,195 บาท"
+				case "3seat", "3ที่นั่ง":
+					return "โซฟา 3ที่นั่ง สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 3,090 บาท, ราคาลด 50% = 1,545 บาท"
+				case "4seat", "4ที่นั่ง":
+					return "โซฟา 4ที่นั่ง สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 3,790 บาท, ราคาลด 50% = 1,895 บาท"
+				case "5seat", "5ที่นั่ง":
+					return "โซฟา 5ที่นั่ง สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 4,490 บาท, ราคาลด 50% = 2,245 บาท"
+				case "6seat", "6ที่นั่ง":
+					return "โซฟา 6ที่นั่ง สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 5,190 บาท, ราคาลด 50% = 2,595 บาท"
+				}
+			case "curtain", "ม่าน", "carpet", "พรม", "ม่าน/พรม":
+				if size == "sqm" || size == "ตรม" || size == "ตร.ม." || size == "ตารางเมตร" || size == "per_sqm" || size == "1sqm" {
+					return "ม่าน/พรม ต่อ 1 ตร.ม. สำหรับสมาชิก NCS Family Member บริการซักขจัดคราบ-กลิ่น: ราคาเต็ม 700 บาท, ราคาลด 50% = 350 บาท"
 				}
 			}
 		}
