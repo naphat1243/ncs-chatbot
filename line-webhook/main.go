@@ -167,11 +167,14 @@ func getLineImageURL(messageID string) (string, error) {
 
 // getAssistantResponse uses OpenAI Assistants API, mapping userId to threadId in-memory
 func getAssistantResponse(userId, message string) string {
+	log.Printf("getAssistantResponse called for user %s with message: %s", userId, message)
+
 	// Check for duplicate question
 	userThreadLock.Lock()
 	lastQA, hasLast := userLastQAMap[userId]
 	userThreadLock.Unlock()
 	if hasLast && lastQA.Question == message {
+		log.Printf("Duplicate question detected for user %s", userId)
 		return "You already asked this question."
 	}
 
@@ -276,8 +279,12 @@ func getAssistantResponse(userId, message string) string {
 	// Run the assistant
 	assistantId := os.Getenv("OPENAI_ASSISTANT_ID")
 	if assistantId == "" {
+		log.Printf("OPENAI_ASSISTANT_ID not set")
 		return "OPENAI_ASSISTANT_ID not set."
 	}
+
+	log.Printf("Running assistant %s on thread %s", assistantId, threadId)
+
 	runReq := map[string]interface{}{
 		"assistant_id": assistantId,
 	}
@@ -289,18 +296,25 @@ func getAssistantResponse(userId, message string) string {
 	runReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
 	runResp, err := client.Do(runReqHttp)
 	if err != nil {
+		log.Printf("Error running assistant: %v", err)
 		return "Error running assistant."
 	}
 	defer runResp.Body.Close()
 	body, _ = io.ReadAll(runResp.Body)
+
+	log.Printf("Assistant run response: %s", string(body))
+
 	var runRespObj struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
 	json.Unmarshal(body, &runRespObj)
 	if runRespObj.ID == "" {
+		log.Printf("Failed to start run. Response: %s", string(body))
 		return "Failed to start run."
 	}
+
+	log.Printf("Assistant run started with ID: %s, initial status: %s", runRespObj.ID, runRespObj.Status)
 
 	// Poll run status and get response waiting 60 sec
 	for i := 0; i < 60; i++ {
@@ -331,34 +345,73 @@ func getAssistantResponse(userId, message string) string {
 			} `json:"required_action"`
 		}
 		json.Unmarshal(statusBody, &statusObj)
-		fmt.Println("Run status:", statusObj.Status)
+		log.Printf("Run status: %s", statusObj.Status)
+
+		// Add detailed logging for function calls
+		if statusObj.RequiredAction.Type == "submit_tool_outputs" {
+			log.Printf("Function calls required: %d", len(statusObj.RequiredAction.SubmitToolOutputs.ToolCalls))
+		}
+
 		// --- เช็ค required_action.submit_tool_outputs.tool_calls ใน /runs ---
 		if statusObj.RequiredAction.Type == "submit_tool_outputs" && len(statusObj.RequiredAction.SubmitToolOutputs.ToolCalls) > 0 {
 			for _, call := range statusObj.RequiredAction.SubmitToolOutputs.ToolCalls {
+				log.Printf("Processing function call: %s", call.Function.Name)
+
 				if call.Function.Name == "get_available_slots_with_months" {
-					var argStr string
-					json.Unmarshal(call.Function.Arguments, &argStr)
-					var month string
-					json.Unmarshal([]byte(argStr), &struct {
-						ThaiMonthYear *string `json:"thai_month_year"`
-					}{&month})
-					if month != "" {
-						url := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + url.QueryEscape(month)
-						resp, err := http.Get(url)
+					log.Printf("get_available_slots_with_months called with arguments: %s", string(call.Function.Arguments))
+
+					// Fix argument parsing - handle direct JSON structure
+					var args struct {
+						ThaiMonthYear string `json:"thai_month_year"`
+					}
+
+					// Try direct unmarshal first
+					err := json.Unmarshal(call.Function.Arguments, &args)
+					if err != nil {
+						log.Printf("Direct unmarshal failed, trying string unmarshal: %v", err)
+						// Try the double unmarshal approach
+						var argStr string
+						json.Unmarshal(call.Function.Arguments, &argStr)
+						json.Unmarshal([]byte(argStr), &args)
+					}
+
+					log.Printf("Parsed month: '%s'", args.ThaiMonthYear)
+
+					if args.ThaiMonthYear != "" {
+						gsUrl := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + url.QueryEscape(args.ThaiMonthYear)
+						log.Printf("Calling Google Apps Script: %s", gsUrl)
+
+						resp, err := http.Get(gsUrl)
 						if err != nil {
+							log.Printf("Error calling Google Apps Script: %v", err)
 							return "Error calling Google Apps Script."
 						}
 						defer resp.Body.Close()
 						gsBody, _ := io.ReadAll(resp.Body)
 						result := string(gsBody)
+
+						log.Printf("Google Apps Script response: %s", result)
+
 						toolOutputs := []map[string]interface{}{{"tool_call_id": call.ID, "output": result}}
 						toolOutputsJson, _ := json.Marshal(map[string]interface{}{"tool_outputs": toolOutputs})
 						submitUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID + "/submit_tool_outputs"
+
+						log.Printf("Submitting tool outputs to: %s", submitUrl)
+
 						submitReq, _ := http.NewRequest("POST", submitUrl, bytes.NewReader(toolOutputsJson))
 						submitReq.Header.Set("Authorization", "Bearer "+apiKey)
 						submitReq.Header.Set("Content-Type", "application/json")
 						submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
-						client.Do(submitReq)
+
+						submitResp, err := client.Do(submitReq)
+						if err != nil {
+							log.Printf("Error submitting tool outputs: %v", err)
+						} else {
+							log.Printf("Tool outputs submitted successfully, status: %d", submitResp.StatusCode)
+							submitResp.Body.Close()
+						}
+					} else {
+						log.Printf("Empty month parameter received")
 					}
 				} else if call.Function.Name == "get_ncs_pricing" {
 					var argStr string
