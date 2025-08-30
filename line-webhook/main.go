@@ -17,6 +17,16 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// getBangkokTime returns current time in Asia/Bangkok in RFC3339 format (YYYY-MM-DDTHH:MM:SS) without timezone suffix.
+func getBangkokTime() string {
+	loc, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		// Fallback to local time if loading fails
+		return time.Now().Format("2006-01-02T15:04:05")
+	}
+	return time.Now().In(loc).Format("2006-01-02T15:04:05")
+}
+
 type LineEvent struct {
 	Events []struct {
 		Type       string `json:"type"`
@@ -254,20 +264,8 @@ func getAssistantResponse(userId, message string) string {
 		userThreadLock.Unlock()
 	}
 
-	// Get current time in Asia/Bangkok
-	timeResp, err := http.Get("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Bangkok")
-	var timeStr string
-	if err == nil {
-		defer timeResp.Body.Close()
-		timeBody, _ := io.ReadAll(timeResp.Body)
-		var timeObj struct {
-			DateTime string `json:"dateTime"`
-		}
-		json.Unmarshal(timeBody, &timeObj)
-		if timeObj.DateTime != "" {
-			timeStr = timeObj.DateTime
-		}
-	}
+	// Get current time in Asia/Bangkok (local calculation – no external API dependency)
+	var timeStr = getBangkokTime()
 
 	// Add message to thread (with current time for GPT)
 	var msgReq map[string]interface{}
