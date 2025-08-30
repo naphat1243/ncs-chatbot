@@ -75,26 +75,45 @@ func main() {
 
 				userThreadLock.Lock()
 				userMsgBuffer[userId] = append(userMsgBuffer[userId], messageContent)
+
+				// Stop existing timer if any
 				if timer, ok := userMsgTimer[userId]; ok {
 					timer.Stop()
 				}
-				t := time.AfterFunc(10*time.Second, func() {
+
+				// Capture replyToken to avoid closure issues
+				replyToken := e.ReplyToken
+
+				// Set new timer for 15 seconds
+				t := time.AfterFunc(15*time.Second, func() {
 					userThreadLock.Lock()
 					msgs := userMsgBuffer[userId]
 					userMsgBuffer[userId] = nil
+					delete(userMsgTimer, userId) // Clean up timer reference
 					userThreadLock.Unlock()
+
 					if len(msgs) == 0 {
+						log.Printf("No messages to process for user %s", userId)
 						return
 					}
-					summary := msgs[0]
-					if len(msgs) > 1 {
-						summary = "สรุปคำถามลูกค้า: " + fmt.Sprintf("%v", msgs)
+
+					var summary string
+					if len(msgs) == 1 {
+						summary = msgs[0]
+						log.Printf("Single message from user %s: %s", userId, summary)
+					} else {
+						summary = fmt.Sprintf("สรุปคำถาม %d ข้อความจากลูกค้า: %v", len(msgs), msgs)
+						log.Printf("Multiple messages (%d) from user %s: %v", len(msgs), userId, msgs)
 					}
+
 					responseText := getAssistantResponse(userId, summary)
-					replyToLine(e.ReplyToken, responseText)
+					replyToLine(replyToken, responseText)
 				})
+
 				userMsgTimer[userId] = t
 				userThreadLock.Unlock()
+
+				log.Printf("Message buffered for user %s (total: %d messages). Timer set for 15 seconds.", userId, len(userMsgBuffer[userId]))
 			}
 		}
 		return c.SendStatus(fiber.StatusOK)
@@ -428,7 +447,10 @@ func getAssistantResponse(userId, message string) string {
 							ThaiMonthYear string `json:"thai_month_year"`
 						}
 						_ = json.Unmarshal([]byte(argStr), &args)
+						fmt.Println("get_available_slots_with_months has been called")
+						fmt.Printf("Parsed arguments for get_available_slots_with_months: %+v\n", args)
 						if args.ThaiMonthYear != "" {
+							fmt.Printf("Calling Google Apps Script for month: %s\n", args.ThaiMonthYear)
 							month := args.ThaiMonthYear
 							// Call Google Apps Script
 							url := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + month
