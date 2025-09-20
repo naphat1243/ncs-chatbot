@@ -1,0 +1,456 @@
+{
+  "services": {
+    "disinfection": {
+      "name": "กำจัดเชื้อโรค-ไรฝุ่น",
+      "aliases": ["disinfection", "กำจัดเชื้อโรค"]
+    },
+    "washing": {
+      "name": "ซักขจัดคราบ-กลิ่น", 
+      "aliases": ["washing", "ซักขจัดคราบ"]
+    }
+  },
+  "items": {
+    "mattress": {
+      "name": "ที่นอน",
+      "aliases": ["mattress", "ที่นอน"],
+      "sizes": {
+        "3-3.5ft": {
+          "name": "3-3.5ฟุต",
+          "aliases": ["3-3.5ft", "3ฟุต", "3.5ฟุต"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 1990,
+                  "discount_35": 1290,
+                  "discount_50": 995
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 995
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 2500,
+                  "discount_35": 1590,
+                  "discount_50": 1250
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1250
+                }
+              }
+            }
+          }
+        },
+        "5-6ft": {
+          "name": "5-6ฟุต",
+          "aliases": ["5-6ft", "5ฟุต", "6ฟุต"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 2390,
+                  "discount_35": 1490,
+                  "discount_50": 1195
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1195
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 2790,
+                  "discount_35": 1790,
+                  "discount_50": 1395
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1395
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sofa": {
+      "name": "โซฟา",
+      "aliases": ["sofa", "โซฟา"],
+      "sizes": {
+        "chair": {
+          "name": "เก้าอี้",
+          "aliases": ["chair", "เก้าอี้"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 450,
+                  "discount_35": 295,
+                  "discount_50": 225
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 225
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 990,
+                  "discount_35": 650,
+                  "discount_50": 495
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 495
+                }
+              }
+            }
+          }
+        },
+        "1seat": {
+          "name": "1ที่นั่ง",
+          "aliases": ["1seat", "1ที่นั่ง"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 990,
+                  "discount_35": 650,
+                  "discount_50": 495
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 495
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 1690,
+                  "discount_35": 1100,
+                  "discount_50": 845
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 845
+                }
+              }
+            }
+          }
+        },
+        "2seat": {
+          "name": "2ที่นั่ง",
+          "aliases": ["2seat", "2ที่นั่ง"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 1690,
+                  "discount_35": 1100,
+                  "discount_50": 845
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 845
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 2390,
+                  "discount_35": 1490,
+                  "discount_50": 1195
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1195
+                }
+              }
+            }
+          }
+        },
+        "3seat": {
+          "name": "3ที่นั่ง",
+          "aliases": ["3seat", "3ที่นั่ง"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 2390,
+                  "discount_35": 1490,
+                  "discount_50": 1195
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1195
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 3090,
+                  "discount_35": 1990,
+                  "discount_50": 1545
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1545
+                }
+              }
+            }
+          }
+        },
+        "4seat": {
+          "name": "4ที่นั่ง",
+          "aliases": ["4seat", "4ที่นั่ง"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 3090,
+                  "discount_35": 1990,
+                  "discount_50": 1545
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1545
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 3790,
+                  "discount_35": 2490,
+                  "discount_50": 1895
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1895
+                }
+              }
+            }
+          }
+        },
+        "5seat": {
+          "name": "5ที่นั่ง",
+          "aliases": ["5seat", "5ที่นั่ง"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 3790,
+                  "discount_35": 2490,
+                  "discount_50": 1895
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 1895
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 4490,
+                  "discount_35": 2900,
+                  "discount_50": 2245
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 2245
+                }
+              }
+            }
+          }
+        },
+        "6seat": {
+          "name": "6ที่นั่ง",
+          "aliases": ["6seat", "6ที่นั่ง"],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 4490,
+                  "discount_35": 2900,
+                  "discount_50": 2245
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 2245
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 5190,
+                  "discount_35": 3350,
+                  "discount_50": 2595
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 2595
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "curtain": {
+      "name": "ม่าน/พรม",
+      "aliases": ["curtain", "ม่าน", "carpet", "พรม", "ม่าน/พรม"],
+      "sizes": {
+        "per_sqm": {
+          "name": "ต่อ 1 ตร.ม.",
+          "aliases": ["sqm", "ตรม", "ตร.ม.", "ตารางเมตร", "ตารางเมตร(ตรม.)", "ต่อ 1 ตรม", "ต่อ1ตรม", "per_sqm", "per_sqm_disinfection", "1sqm", ""],
+          "pricing": {
+            "disinfection": {
+              "new": {
+                "regular": {
+                  "full_price": 150,
+                  "discount_35": 95,
+                  "discount_50": 75
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 75
+                }
+              }
+            },
+            "washing": {
+              "new": {
+                "regular": {
+                  "full_price": 700,
+                  "discount_35": 450,
+                  "discount_50": 350
+                }
+              },
+              "member": {
+                "regular": {
+                  "discount_50": 350
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "packages": {
+    "coupon": {
+      "name": "แพคเพจคูปอง",
+      "aliases": ["coupon", "คูปอง"],
+      "disinfection": {
+        "5": {
+          "full_price": 12950,
+          "discount": 7460,
+          "sale_price": 5490,
+          "per_item": 1098
+        },
+        "10": {
+          "full_price": 25900,
+          "discount": 16000,
+          "sale_price": 9900,
+          "per_item": 990
+        },
+        "20": {
+          "full_price": 51800,
+          "discount": 32800,
+          "sale_price": 19000,
+          "per_item": 950
+        }
+      },
+      "washing": {
+        "5": {
+          "full_price": 13500,
+          "discount": 6550,
+          "sale_price": 6950,
+          "per_item": 1390
+        },
+        "10": {
+          "full_price": 27000,
+          "discount": 14100,
+          "sale_price": 12900,
+          "per_item": 1290
+        }
+      }
+    },
+    "contract": {
+      "name": "สัญญา",
+      "aliases": ["contract", "สัญญา"],
+      "disinfection": {
+        "2": {
+          "full_price": 4780,
+          "discount": 2090,
+          "sale_price": 2690,
+          "per_item": 1345,
+          "deposit_min": 1000
+        },
+        "3": {
+          "full_price": 7170,
+          "discount": 3520,
+          "sale_price": 3850,
+          "per_item": 1283,
+          "deposit_min": 1000
+        },
+        "4": {
+          "full_price": 9560,
+          "discount": 4870,
+          "sale_price": 4690,
+          "per_item": 1173,
+          "deposit_min": 1000
+        },
+        "5": {
+          "full_price": 11950,
+          "discount": 6860,
+          "sale_price": 5450,
+          "per_item": 1090,
+          "deposit_min": 1000
+        }
+      }
+    }
+  },
+  "customer_types": {
+    "new": {
+      "name": "ลูกค้าใหม่",
+      "aliases": ["new", "ลูกค้าใหม่", ""]
+    },
+    "member": {
+      "name": "สมาชิก NCS Family Member",
+      "aliases": ["member", "เมมเบอร์", "สมาชิก"]
+    }
+  }
+}

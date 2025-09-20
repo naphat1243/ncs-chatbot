@@ -17,6 +17,75 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// PricingConfig represents the JSON pricing configuration structure
+type PricingConfig struct {
+	Services      map[string]ServiceConfig      `json:"services"`
+	Items         map[string]ItemConfig         `json:"items"`
+	Packages      map[string]PackageConfig      `json:"packages"`
+	CustomerTypes map[string]CustomerTypeConfig `json:"customer_types"`
+}
+
+type ServiceConfig struct {
+	Name    string   `json:"name"`
+	Aliases []string `json:"aliases"`
+}
+
+type ItemConfig struct {
+	Name    string                `json:"name"`
+	Aliases []string              `json:"aliases"`
+	Sizes   map[string]SizeConfig `json:"sizes"`
+}
+
+type SizeConfig struct {
+	Name    string                                       `json:"name"`
+	Aliases []string                                     `json:"aliases"`
+	Pricing map[string]map[string]map[string]PriceConfig `json:"pricing"` // [service][customer][package]
+}
+
+type PriceConfig struct {
+	FullPrice  int `json:"full_price,omitempty"`
+	Discount35 int `json:"discount_35,omitempty"`
+	Discount50 int `json:"discount_50,omitempty"`
+}
+
+type PackageConfig struct {
+	Name         string                  `json:"name"`
+	Aliases      []string                `json:"aliases"`
+	Disinfection map[string]PackagePrice `json:"disinfection,omitempty"`
+	Washing      map[string]PackagePrice `json:"washing,omitempty"`
+}
+
+type PackagePrice struct {
+	FullPrice  int `json:"full_price"`
+	Discount   int `json:"discount"`
+	SalePrice  int `json:"sale_price"`
+	PerItem    int `json:"per_item"`
+	DepositMin int `json:"deposit_min,omitempty"`
+}
+
+type CustomerTypeConfig struct {
+	Name    string   `json:"name"`
+	Aliases []string `json:"aliases"`
+}
+
+var pricingConfig *PricingConfig
+
+// loadPricingConfig loads pricing configuration from JSON file
+func loadPricingConfig() error {
+	data, err := os.ReadFile("pricing_config.json")
+	if err != nil {
+		return fmt.Errorf("failed to read pricing config: %v", err)
+	}
+
+	pricingConfig = &PricingConfig{}
+	if err := json.Unmarshal(data, pricingConfig); err != nil {
+		return fmt.Errorf("failed to parse pricing config: %v", err)
+	}
+
+	log.Println("Pricing configuration loaded successfully")
+	return nil
+}
+
 // getBangkokTime returns current time in Asia/Bangkok in RFC3339 format (YYYY-MM-DDTHH:MM:SS) without timezone suffix.
 func getBangkokTime() string {
 	loc, err := time.LoadLocation("Asia/Bangkok")
@@ -25,6 +94,46 @@ func getBangkokTime() string {
 		return time.Now().Format("2006-01-02T15:04:05")
 	}
 	return time.Now().In(loc).Format("2006-01-02T15:04:05")
+}
+
+// extractAndProcessPricingJSON extracts JSON pricing parameters from assistant response and calls getNCSPricing
+func extractAndProcessPricingJSON(response string) string {
+	log.Printf("Attempting to extract JSON from response: %s", response)
+
+	// Look for JSON pattern in the response
+	start := strings.Index(response, "{")
+	end := strings.LastIndex(response, "}")
+
+	if start == -1 || end == -1 || start >= end {
+		log.Printf("No valid JSON found in response")
+		return ""
+	}
+
+	jsonStr := response[start : end+1]
+	log.Printf("Extracted JSON string: %s", jsonStr)
+
+	var args struct {
+		ServiceType  string `json:"service_type"`
+		ItemType     string `json:"item_type"`
+		Size         string `json:"size"`
+		CustomerType string `json:"customer_type"`
+		PackageType  string `json:"package_type"`
+		Quantity     int    `json:"quantity"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonStr), &args); err != nil {
+		log.Printf("Failed to parse extracted JSON: %v", err)
+		return ""
+	}
+
+	log.Printf("Successfully parsed JSON: ServiceType=%s, ItemType=%s, Size=%s, CustomerType=%s, PackageType=%s, Quantity=%d",
+		args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
+
+	// Call the pricing function with the extracted parameters
+	result := getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
+	log.Printf("Pricing function result: %s", result)
+
+	return result
 }
 
 type LineEvent struct {
@@ -56,6 +165,11 @@ var (
 )
 
 func main() {
+	// Load pricing configuration
+	if err := loadPricingConfig(); err != nil {
+		log.Fatal("Failed to load pricing configuration:", err)
+	}
+
 	app := fiber.New()
 
 	app.Post("/webhook", func(c *fiber.Ctx) error {
@@ -513,14 +627,49 @@ func getAssistantResponse(userId, message string) string {
 						aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "ไม่พบเดือน"})
 					}
 				} else if call.Function.Name == "get_ncs_pricing" {
-					var argStr string
-					json.Unmarshal(call.Function.Arguments, &argStr)
+					log.Printf("get_ncs_pricing called with arguments: %s", string(call.Function.Arguments))
 					var args struct {
-						ServiceType, ItemType, Size, CustomerType, PackageType string
-						Quantity                                               int
+						ServiceType  string `json:"service_type"`
+						ItemType     string `json:"item_type"`
+						Size         string `json:"size,omitempty"`
+						CustomerType string `json:"customer_type,omitempty"`
+						PackageType  string `json:"package_type,omitempty"`
+						Quantity     int    `json:"quantity,omitempty"`
 					}
-					json.Unmarshal([]byte(argStr), &args)
+
+					// Try direct unmarshaling first
+					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+						// If that fails, try double unmarshaling (string wrapped)
+						var argStr string
+						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
+							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
+								log.Printf("Failed to parse get_ncs_pricing arguments after double unmarshal: %v", err3)
+								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing pricing arguments: " + err3.Error()})
+								continue
+							}
+						} else {
+							log.Printf("Failed to parse get_ncs_pricing arguments: %v", err)
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing pricing arguments: " + err.Error()})
+							continue
+						}
+					}
+
+					// Set defaults for optional parameters according to GPT function definition
+					if args.CustomerType == "" {
+						args.CustomerType = "new" // Default to new customer
+					}
+					if args.PackageType == "" {
+						args.PackageType = "regular" // Default to regular pricing
+					}
+					if args.Quantity == 0 {
+						args.Quantity = 1 // Default quantity
+					}
+
+					log.Printf("Parsed pricing arguments: ServiceType='%s', ItemType='%s', Size='%s', CustomerType='%s', PackageType='%s', Quantity=%d",
+						args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
+
 					result := getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
+					log.Printf("Pricing function result: %s", result)
 					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
 				}
 			}
@@ -582,6 +731,18 @@ func getAssistantResponse(userId, message string) string {
 		if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
 			if msgList.Data[i].Content[0].Type == "text" {
 				reply := msgList.Data[i].Content[0].Text.Value
+				log.Printf("Assistant text response: %s", reply)
+
+				// Check if the response contains JSON pricing parameters (GPT returning JSON instead of calling function)
+				if strings.Contains(reply, "service_type") && strings.Contains(reply, "item_type") {
+					log.Printf("Detected JSON pricing parameters in text response, attempting to parse and call function")
+					// Try to extract and parse JSON from the response
+					if pricingResult := extractAndProcessPricingJSON(reply); pricingResult != "" {
+						log.Printf("Successfully processed pricing JSON: %s", pricingResult)
+						return pricingResult
+					}
+				}
+
 				if reply != "" && !isErrorResponse(reply) {
 					// Only store successful responses, not error messages
 					userThreadLock.Lock()
@@ -731,19 +892,327 @@ func getAssistantResponse(userId, message string) string {
 	return ""
 }
 
-// getNCSPricing returns pricing information for NCS cleaning services
+// Helper functions for JSON-based pricing
+func normalizeAlias(input string, aliases []string) bool {
+	input = strings.ToLower(strings.TrimSpace(input))
+	for _, alias := range aliases {
+		if strings.ToLower(alias) == input {
+			return true
+		}
+	}
+	return false
+}
+
+func findServiceKey(input string) string {
+	for key, service := range pricingConfig.Services {
+		if normalizeAlias(input, service.Aliases) {
+			return key
+		}
+	}
+	return ""
+}
+
+func findItemKey(input string) string {
+	for key, item := range pricingConfig.Items {
+		if normalizeAlias(input, item.Aliases) {
+			return key
+		}
+	}
+	return ""
+}
+
+func findPackageKey(input string) string {
+	for key, pkg := range pricingConfig.Packages {
+		if normalizeAlias(input, pkg.Aliases) {
+			return key
+		}
+	}
+	return ""
+}
+
+func findCustomerKey(input string) string {
+	for key, customer := range pricingConfig.CustomerTypes {
+		if normalizeAlias(input, customer.Aliases) {
+			return key
+		}
+	}
+	return ""
+}
+
+func findSizeKey(input string, sizes map[string]SizeConfig) string {
+	for key, size := range sizes {
+		if normalizeAlias(input, size.Aliases) {
+			return key
+		}
+	}
+	return ""
+}
+
+func formatPrice(price PriceConfig, serviceName, itemName, sizeName, customerName string) string {
+	var result strings.Builder
+
+	result.WriteString(fmt.Sprintf("%s %s บริการ%s", itemName, sizeName, serviceName))
+
+	if customerName != "" {
+		result.WriteString(fmt.Sprintf(" สำหรับ%s", customerName))
+	}
+	result.WriteString(": ")
+
+	parts := []string{}
+	if price.FullPrice > 0 {
+		parts = append(parts, fmt.Sprintf("ราคาเต็ม %s บาท", formatNumber(price.FullPrice)))
+	}
+	if price.Discount35 > 0 {
+		parts = append(parts, fmt.Sprintf("ลด 35%% = %s บาท", formatNumber(price.Discount35)))
+	}
+	if price.Discount50 > 0 {
+		parts = append(parts, fmt.Sprintf("ลด 50%% = %s บาท", formatNumber(price.Discount50)))
+	}
+
+	result.WriteString(strings.Join(parts, ", "))
+	return result.String()
+}
+
+func formatPackagePrice(pkg PackagePrice, serviceName, packageName string, quantity int) string {
+	depositInfo := ""
+	if pkg.DepositMin > 0 {
+		depositInfo = fmt.Sprintf(" มัดจำขั้นต่ำ %s บาท", formatNumber(pkg.DepositMin))
+	}
+
+	return fmt.Sprintf("%s %d ใบ บริการ%s: ราคาเต็ม %s บาท, ส่วนลด %s บาท, ราคาขาย %s บาท (เฉลี่ย %s บาท/ใบ)%s",
+		packageName, quantity, serviceName,
+		formatNumber(pkg.FullPrice),
+		formatNumber(pkg.Discount),
+		formatNumber(pkg.SalePrice),
+		formatNumber(pkg.PerItem),
+		depositInfo)
+}
+
+func formatNumber(n int) string {
+	str := fmt.Sprintf("%d", n)
+	if len(str) <= 3 {
+		return str
+	}
+
+	var result strings.Builder
+	for i, r := range str {
+		if i > 0 && (len(str)-i)%3 == 0 {
+			result.WriteString(",")
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
+}
+
+// getNCSPricingJSON returns pricing information using JSON configuration
+func getNCSPricingJSON(serviceType, itemType, size, customerType, packageType string, quantity int) string {
+	if pricingConfig == nil {
+		return "ระบบราคายังไม่พร้อมใช้งาน กรุณาลองใหม่อีกครั้ง"
+	}
+
+	log.Printf("getNCSPricingJSON called with: serviceType='%s', itemType='%s', size='%s', customerType='%s', packageType='%s', quantity=%d",
+		serviceType, itemType, size, customerType, packageType, quantity)
+
+	// Normalize inputs
+	serviceKey := findServiceKey(serviceType)
+	itemKey := findItemKey(itemType)
+	customerKey := findCustomerKey(customerType)
+	packageKey := findPackageKey(packageType)
+
+	// Set defaults
+	if customerKey == "" {
+		customerKey = "new" // default customer type
+	}
+	if packageKey == "" {
+		packageKey = "regular" // default package type
+	}
+
+	log.Printf("Normalized keys: serviceKey='%s', itemKey='%s', customerKey='%s', packageKey='%s'",
+		serviceKey, itemKey, customerKey, packageKey)
+
+	// Handle package pricing
+	if packageKey != "regular" {
+		return handlePackagePricing(serviceKey, packageKey, quantity)
+	}
+
+	// Handle regular item pricing
+	if serviceKey == "" || itemKey == "" {
+		return generateFallbackResponse(serviceType, itemType, size)
+	}
+
+	return handleItemPricing(serviceKey, itemKey, size, customerKey)
+}
+
+func handlePackagePricing(serviceKey, packageKey string, quantity int) string {
+	pkg, exists := pricingConfig.Packages[packageKey]
+	if !exists {
+		return "ไม่พบข้อมูลแพคเพจที่ระบุ"
+	}
+
+	serviceName := ""
+	if serviceKey != "" {
+		if svc, exists := pricingConfig.Services[serviceKey]; exists {
+			serviceName = svc.Name
+		}
+	} else {
+		serviceName = "ทำความสะอาด"
+	}
+
+	quantityStr := fmt.Sprintf("%d", quantity)
+
+	if serviceKey == "disinfection" && pkg.Disinfection != nil {
+		if price, exists := pkg.Disinfection[quantityStr]; exists {
+			return formatPackagePrice(price, serviceName, pkg.Name, quantity)
+		}
+	} else if serviceKey == "washing" && pkg.Washing != nil {
+		if price, exists := pkg.Washing[quantityStr]; exists {
+			return formatPackagePrice(price, serviceName, pkg.Name, quantity)
+		}
+	}
+
+	return fmt.Sprintf("ไม่พบข้อมูลราคา%s %d ใบ สำหรับบริการ%s", pkg.Name, quantity, serviceName)
+}
+
+func handleItemPricing(serviceKey, itemKey, size, customerKey string) string {
+	item, exists := pricingConfig.Items[itemKey]
+	if !exists {
+		return "ไม่พบข้อมูลสินค้าที่ระบุ"
+	}
+
+	service := pricingConfig.Services[serviceKey]
+	customer := pricingConfig.CustomerTypes[customerKey]
+
+	// Handle case where no size is specified
+	if size == "" {
+		return generateItemSizeList(serviceKey, itemKey, customerKey)
+	}
+
+	// Find size
+	sizeKey := findSizeKey(size, item.Sizes)
+	if sizeKey == "" {
+		return generateItemSizeList(serviceKey, itemKey, customerKey)
+	}
+
+	sizeConfig := item.Sizes[sizeKey]
+
+	// Get pricing
+	if servicePricing, exists := sizeConfig.Pricing[serviceKey]; exists {
+		if customerPricing, exists := servicePricing[customerKey]; exists {
+			if regularPricing, exists := customerPricing["regular"]; exists {
+				return formatPrice(regularPricing, service.Name, item.Name, sizeConfig.Name, customer.Name)
+			}
+		}
+	}
+
+	return fmt.Sprintf("ไม่พบข้อมูลราคา%s %s %s สำหรับ%s", item.Name, sizeConfig.Name, service.Name, customer.Name)
+}
+
+func generateItemSizeList(serviceKey, itemKey, customerKey string) string {
+	item := pricingConfig.Items[itemKey]
+	service := pricingConfig.Services[serviceKey]
+	customer := pricingConfig.CustomerTypes[customerKey]
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("บริการทำความสะอาด%s %s", item.Name, service.Name))
+	if customerKey != "new" {
+		result.WriteString(fmt.Sprintf(" สำหรับ%s", customer.Name))
+	}
+	result.WriteString(":\n")
+
+	count := 0
+	for _, sizeConfig := range item.Sizes {
+		if servicePricing, exists := sizeConfig.Pricing[serviceKey]; exists {
+			if customerPricing, exists := servicePricing[customerKey]; exists {
+				if pricing, exists := customerPricing["regular"]; exists {
+					count++
+					result.WriteString(fmt.Sprintf("• %s %s: ", item.Name, sizeConfig.Name))
+
+					parts := []string{}
+					if pricing.FullPrice > 0 {
+						parts = append(parts, fmt.Sprintf("%s บาท", formatNumber(pricing.FullPrice)))
+					}
+					if pricing.Discount35 > 0 {
+						parts = append(parts, fmt.Sprintf("ลด 35%% = %s บาท", formatNumber(pricing.Discount35)))
+					}
+					if pricing.Discount50 > 0 {
+						parts = append(parts, fmt.Sprintf("ลด 50%% = %s บาท", formatNumber(pricing.Discount50)))
+					}
+					result.WriteString(strings.Join(parts, ", "))
+					result.WriteString("\n")
+				}
+			}
+		}
+	}
+
+	if count == 0 {
+		return fmt.Sprintf("ไม่พบข้อมูลราคา%s สำหรับบริการ%s", item.Name, service.Name)
+	}
+
+	result.WriteString(fmt.Sprintf("\nกรุณาระบุขนาด%sเพื่อข้อมูลราคาที่แม่นยำ", item.Name))
+	return result.String()
+}
+
+func generateFallbackResponse(serviceType, itemType, size string) string {
+	return fmt.Sprintf("ขออภัย ไม่พบข้อมูลราคาสำหรับ บริการ: '%s' สินค้า: '%s' ขนาด: '%s'\n\nกรุณาติดต่อเจ้าหน้าที่เพื่อสอบถามราคาเพิ่มเติม หรือระบุรายละเอียดให้ชัดเจนมากขึ้น เช่น:\n• ประเภทบริการ (กำจัดเชื้อโรค หรือ ซักขจัดคราบ)\n• ประเภทสินค้า (ที่นอน/โซฟา/ม่าน/พรม)\n• ขนาด (3ฟุต, 6ฟุต, 2ที่นั่ง, ฯลฯ)\n• ประเภทลูกค้า (ลูกค้าใหม่ หรือ สมาชิก)",
+		serviceType, itemType, size)
+}
+
+// getNCSPricing returns pricing information for NCS cleaning services (Legacy version for backward compatibility)
 func getNCSPricing(serviceType, itemType, size, customerType, packageType string, quantity int) string {
+	// Use JSON-based pricing if configuration is loaded
+	if pricingConfig != nil {
+		return getNCSPricingJSON(serviceType, itemType, size, customerType, packageType, quantity)
+	}
+
+	// Fallback to hardcoded pricing if JSON config is not available
+	log.Printf("Using fallback hardcoded pricing")
+	return getNCSPricingHardcoded(serviceType, itemType, size, customerType, packageType, quantity)
+}
+
+// getNCSPricingHardcoded returns pricing information for NCS cleaning services (Legacy hardcoded version)
+func getNCSPricingHardcoded(serviceType, itemType, size, customerType, packageType string, quantity int) string {
+	log.Printf("getNCSPricing called with: serviceType='%s', itemType='%s', size='%s', customerType='%s', packageType='%s', quantity=%d",
+		serviceType, itemType, size, customerType, packageType, quantity)
+
+	// Handle customer type variations (including Thai)
+	normalizedCustomerType := strings.ToLower(customerType)
+	if normalizedCustomerType == "" || normalizedCustomerType == "new" || normalizedCustomerType == "ลูกค้าใหม่" {
+		customerType = "new"
+	} else if normalizedCustomerType == "member" || normalizedCustomerType == "เมมเบอร์" || normalizedCustomerType == "สมาชิก" || strings.Contains(normalizedCustomerType, "member") {
+		customerType = "member"
+	}
+
+	// Handle package type variations (including Thai)
+	normalizedPackageType := strings.ToLower(packageType)
+	if normalizedPackageType == "" || normalizedPackageType == "regular" || normalizedPackageType == "ปกติ" {
+		packageType = "regular"
+	} else if normalizedPackageType == "coupon" || normalizedPackageType == "คูปอง" {
+		packageType = "coupon"
+	} else if normalizedPackageType == "contract" || normalizedPackageType == "สัญญา" {
+		packageType = "contract"
+	}
+
+	log.Printf("Normalized values: customerType='%s', packageType='%s'", customerType, packageType)
+
 	// New Customer Regular Pricing
-	if customerType == "new" || customerType == "" {
+	if customerType == "new" {
 		if serviceType == "disinfection" || serviceType == "กำจัดเชื้อโรค" {
 			switch itemType {
 			case "mattress", "ที่นอน":
+				// Handle case where size is not specified - return both mattress sizes
+				if size == "" {
+					return "บริการทำความสะอาดที่นอน กำจัดเชื้อโรค-ไรฝุ่น:\n• ที่นอน 3-3.5ฟุต: 1,990 บาท (ลด 35% = 1,290 บาท, ลด 50% = 995 บาท)\n• ที่นอน 5-6ฟุต: 2,390 บาท (ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท)\n\nกรุณาระบุขนาดที่นอนเพื่อข้อมูลราคาที่แม่นยำ"
+				}
 				if size == "3-3.5ft" || size == "3ฟุต" || size == "3.5ฟุต" {
 					return "ที่นอน 3-3.5ฟุต บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 1,990 บาท, ลด 35% = 1,290 บาท, ลด 50% = 995 บาท"
 				} else if size == "5-6ft" || size == "5ฟุต" || size == "6ฟุต" {
 					return "ที่นอน 5-6ฟุต บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 2,390 บาท, ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท"
 				}
 			case "sofa", "โซฟา":
+				// Handle case where size is not specified - return general sofa pricing
+				if size == "" {
+					return "บริการทำความสะอาดโซฟา กำจัดเชื้อโรค-ไรฝุ่น:\n• เก้าอี้: 450 บาท (ลด 35% = 295 บาท, ลด 50% = 225 บาท)\n• โซฟา 1ที่นั่ง: 990 บาท (ลด 35% = 650 บาท, ลด 50% = 495 บาท)\n• โซฟา 2ที่นั่ง: 1,690 บาท (ลด 35% = 1,100 บาท, ลด 50% = 845 บาท)\n• โซฟา 3ที่นั่ง: 2,390 บาท (ลด 35% = 1,490 บาท, ลด 50% = 1,195 บาท)\n\nกรุณาระบุขนาดโซฟาเพื่อข้อมูลราคาที่แม่นยำ"
+				}
 				switch size {
 				case "chair", "เก้าอี้":
 					return "เก้าอี้ บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 450 บาท, ลด 35% = 295 บาท, ลด 50% = 225 บาท"
@@ -761,8 +1230,8 @@ func getNCSPricing(serviceType, itemType, size, customerType, packageType string
 					return "โซฟา 6ที่นั่ง บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 4,490 บาท, ลด 35% = 2,900 บาท, ลด 50% = 2,245 บาท"
 				}
 			case "curtain", "ม่าน", "carpet", "พรม", "ม่าน/พรม":
-				// Support per square meter queries for disinfection
-				if size == "sqm" || size == "ตรม" || size == "ตร.ม." || size == "ตารางเมตร" || size == "ตารางเมตร(ตรม.)" || size == "ต่อ 1 ตรม" || size == "ต่อ1ตรม" || size == "per_sqm" || size == "per_sqm_disinfection" || size == "1sqm" {
+				// Default to per square meter pricing if no size specified
+				if size == "" || size == "sqm" || size == "ตรม" || size == "ตร.ม." || size == "ตารางเมตร" || size == "ตารางเมตร(ตรม.)" || size == "ต่อ 1 ตรม" || size == "ต่อ1ตรม" || size == "per_sqm" || size == "per_sqm_disinfection" || size == "1sqm" {
 					return "ม่าน/พรม ต่อ 1 ตร.ม. บริการกำจัดเชื้อโรค-ไรฝุ่น: ราคาเต็ม 150 บาท, ลด 35% = 95 บาท, ลด 50% = 75 บาท"
 				}
 			}
