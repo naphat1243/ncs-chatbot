@@ -295,6 +295,17 @@ func getLineImageURL(messageID string) (string, error) {
 	}
 	log.Printf("Image data size: %d bytes", len(imageData))
 
+	// Check if image is too large for OpenAI API (limit ~20MB for data URLs)
+	const maxImageSize = 20 * 1024 * 1024 // 20MB
+	if len(imageData) > maxImageSize {
+		log.Printf("⚠️ Image too large (%d bytes > %d bytes). Attempting to resize...", len(imageData), maxImageSize)
+		
+		// Try to compress/resize the image (basic approach)
+		// For production, you might want to use a proper image processing library
+		// For now, we'll truncate or reject very large images
+		return "", fmt.Errorf("รูปภาพมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปภาพแล้วลองใหม่อีกครั้ง")
+	}
+
 	// Get content type or default to image/jpeg
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
@@ -305,7 +316,15 @@ func getLineImageURL(messageID string) (string, error) {
 	// Convert to base64 data URL for GPT-4 Vision
 	base64Data := base64.StdEncoding.EncodeToString(imageData)
 	dataURL := fmt.Sprintf("data:%s;base64,%s", contentType, base64Data)
-	log.Printf("Successfully created data URL. Length: %d characters", len(dataURL))
+	
+	// Check final data URL length (OpenAI has limits on data URL size)
+	const maxDataURLLength = 1000000 // ~1MB base64 encoded
+	if len(dataURL) > maxDataURLLength {
+		log.Printf("⚠️ Data URL too long (%d chars > %d chars)", len(dataURL), maxDataURLLength)
+		return "", fmt.Errorf("รูปภาพมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปภาพแล้วลองใหม่อีกครั้ง")
+	}
+	
+	log.Printf("✅ Successfully created data URL. Length: %d characters", len(dataURL))
 
 	return dataURL, nil
 }
@@ -415,17 +434,22 @@ func getAssistantResponse(userId, message string) string {
 			log.Printf("❌ ERROR: Could not find data:image in message")
 			return "ขออภัย ไม่สามารถประมวลผลรูปภาพได้ กรุณาลองใหม่อีกครั้ง"
 		}
-
+		
 		imageURL := message[imageStartIndex:] // Extract URL from "data:image..."
 		log.Printf("🔍 Image URL extracted - Length: %d characters", len(imageURL))
-
+		
+		// Check if image data URL is too large for OpenAI API
+		const maxDataURLLength = 1000000 // ~1MB base64 encoded
+		if len(imageURL) > maxDataURLLength {
+			log.Printf("⚠️ Data URL too long (%d chars > %d chars) - rejecting", len(imageURL), maxDataURLLength)
+			return "ขออภัย รูปภาพมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปภาพหรือถ่ายรูปใหม่ให้เล็กกว่านี้แล้วลองใหม่อีกครั้งค่ะ 📸"
+		}
+		
 		// Validate data URL format
 		if !strings.HasPrefix(imageURL, "data:image/") {
 			log.Printf("❌ ERROR: Invalid data URL format: %s", imageURL[:50])
 			return "ขออภัย รูปแบบรูปภาพไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง"
-		}
-
-		// Show preview of image URL (first 100 chars or less)
+		}		// Show preview of image URL (first 100 chars or less)
 		previewLen := 100
 		if len(imageURL) < previewLen {
 			previewLen = len(imageURL)
