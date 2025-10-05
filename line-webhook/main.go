@@ -671,6 +671,124 @@ func getAssistantResponse(userId, message string) string {
 					result := getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
 					log.Printf("Pricing function result: %s", result)
 					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
+				} else if call.Function.Name == "get_action_step_summary" {
+					log.Printf("get_action_step_summary called with arguments: %s", string(call.Function.Arguments))
+					var args struct {
+						AnalysisType       string `json:"analysis_type"`
+						ItemIdentified     string `json:"item_identified"`
+						ConditionAssessed  string `json:"condition_assessed,omitempty"`
+						RecommendedService string `json:"recommended_service,omitempty"`
+					}
+
+					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+						var argStr string
+						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
+							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
+								log.Printf("Failed to parse get_action_step_summary arguments after double unmarshal: %v", err3)
+								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing step summary arguments: " + err3.Error()})
+								continue
+							}
+						} else {
+							log.Printf("Failed to parse get_action_step_summary arguments: %v", err)
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing step summary arguments: " + err.Error()})
+							continue
+						}
+					}
+
+					log.Printf("Parsed step summary arguments: AnalysisType='%s', ItemIdentified='%s', ConditionAssessed='%s', RecommendedService='%s'",
+						args.AnalysisType, args.ItemIdentified, args.ConditionAssessed, args.RecommendedService)
+
+					result := getActionStepSummary(args.AnalysisType, args.ItemIdentified, args.ConditionAssessed, args.RecommendedService)
+					log.Printf("Step summary result: %s", result)
+					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
+				} else if call.Function.Name == "get_image_analysis_guidance" {
+					log.Printf("get_image_analysis_guidance called with arguments: %s", string(call.Function.Arguments))
+					var args struct {
+						ImageType       string `json:"image_type,omitempty"`
+						AnalysisRequest string `json:"analysis_request,omitempty"`
+					}
+
+					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+						var argStr string
+						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
+							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
+								log.Printf("Failed to parse get_image_analysis_guidance arguments after double unmarshal: %v", err3)
+								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing image guidance arguments: " + err3.Error()})
+								continue
+							}
+						} else {
+							log.Printf("Failed to parse get_image_analysis_guidance arguments: %v", err)
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing image guidance arguments: " + err.Error()})
+							continue
+						}
+					}
+
+					log.Printf("Parsed image guidance arguments: ImageType='%s', AnalysisRequest='%s'",
+						args.ImageType, args.AnalysisRequest)
+
+					result := getImageAnalysisGuidance(args.ImageType, args.AnalysisRequest)
+					log.Printf("Image guidance result: %s", result)
+					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
+				} else if call.Function.Name == "get_workflow_step_instruction" {
+					log.Printf("get_workflow_step_instruction called with arguments: %s", string(call.Function.Arguments))
+					var args struct {
+						CurrentStep     int    `json:"current_step"`
+						UserMessage     string `json:"user_message,omitempty"`
+						ImageAnalysis   string `json:"image_analysis,omitempty"`
+						PreviousContext string `json:"previous_context,omitempty"`
+					}
+
+					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+						var argStr string
+						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
+							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
+								log.Printf("Failed to parse get_workflow_step_instruction arguments after double unmarshal: %v", err3)
+								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing workflow step arguments: " + err3.Error()})
+								continue
+							}
+						} else {
+							log.Printf("Failed to parse get_workflow_step_instruction arguments: %v", err)
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing workflow step arguments: " + err.Error()})
+							continue
+						}
+					}
+
+					log.Printf("Parsed workflow step arguments: CurrentStep=%d, UserMessage='%s', ImageAnalysis='%s', PreviousContext='%s'",
+						args.CurrentStep, args.UserMessage, args.ImageAnalysis, args.PreviousContext)
+
+					result := getWorkflowStepInstruction(args.CurrentStep, args.UserMessage, args.ImageAnalysis, args.PreviousContext)
+					log.Printf("Workflow step result: %s", result)
+					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
+				} else if call.Function.Name == "get_current_workflow_step" {
+					log.Printf("get_current_workflow_step called with arguments: %s", string(call.Function.Arguments))
+					var args struct {
+						UserMessage     string `json:"user_message"`
+						ImageAnalysis   string `json:"image_analysis,omitempty"`
+						PreviousContext string `json:"previous_context,omitempty"`
+					}
+
+					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+						var argStr string
+						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
+							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
+								log.Printf("Failed to parse get_current_workflow_step arguments after double unmarshal: %v", err3)
+								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing current step arguments: " + err3.Error()})
+								continue
+							}
+						} else {
+							log.Printf("Failed to parse get_current_workflow_step arguments: %v", err)
+							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing current step arguments: " + err.Error()})
+							continue
+						}
+					}
+
+					log.Printf("Parsed current step arguments: UserMessage='%s', ImageAnalysis='%s', PreviousContext='%s'",
+						args.UserMessage, args.ImageAnalysis, args.PreviousContext)
+
+					stepNumber := getCurrentWorkflowStep(args.UserMessage, args.ImageAnalysis, args.PreviousContext)
+					result := fmt.Sprintf("Current workflow step: %d", stepNumber)
+					log.Printf("Current step result: %s", result)
+					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
 				}
 			}
 			if len(aggregatedOutputs) > 0 {
@@ -890,6 +1008,288 @@ func getAssistantResponse(userId, message string) string {
 		}
 	}
 	return ""
+}
+
+// getWorkflowStepInstruction manages GPT workflow and provides step-by-step instructions
+func getWorkflowStepInstruction(currentStep int, userMessage, imageAnalysis, previousContext string) string {
+	log.Printf("getWorkflowStepInstruction called with: currentStep=%d, userMessage='%s', imageAnalysis='%s', previousContext='%s'",
+		currentStep, userMessage, imageAnalysis, previousContext)
+
+	var instruction strings.Builder
+
+	switch currentStep {
+	case 1:
+		// Step 1: Initial customer contact and image analysis
+		instruction.WriteString("🔄 **STEP 1: รับข้อมูลลูกค้าและวิเคราะห์รูปภาพ**\n\n")
+		instruction.WriteString("**สิ่งที่คุณต้องทำ:**\n")
+		instruction.WriteString("• วิเคราะห์รูปภาพที่ลูกค้าส่งมา\n")
+		instruction.WriteString("• ระบุประเภทสิ่งของ (ที่นอน/โซฟา/ม่าน/พรม)\n")
+		instruction.WriteString("• ประเมินขนาดโดยประมาณ\n")
+		instruction.WriteString("• ตรวจสอบสภาพและปัญหา (คราบ/กลิ่น/ไรฝุ่น)\n")
+		instruction.WriteString("• เรียกใช้ get_action_step_summary พร้อมข้อมูลที่วิเคราะห์ได้\n\n")
+		instruction.WriteString("**ห้ามทำ:**\n")
+		instruction.WriteString("• ไม่ให้ราคาทันที\n")
+		instruction.WriteString("• ไม่เรียกใช้ get_ncs_pricing ยัง\n")
+		instruction.WriteString("• ไม่ให้คำแนะนำแบบสุดท้าย\n\n")
+		instruction.WriteString("**ตัวอย่างการตอบ:**\n")
+		instruction.WriteString("\"จากรูปภาพที่คุณส่งมา ฉันเห็นว่าเป็น[ประเภทสิ่งของ] ขนาดประมาณ [ขนาด] และมี[ปัญหาที่พบ] ให้ฉันเตรียมขั้นตอนการดำเนินการให้คุณนะคะ\"\n")
+		instruction.WriteString("จากนั้นเรียกใช้ get_action_step_summary\n\n")
+		instruction.WriteString("**Step ถัดไป:** เมื่อลูกค้าตอบกลับ ให้เรียกใช้ getWorkflowStepInstruction(2, ...)")
+
+	case 2:
+		// Step 2: Service recommendation and confirmation
+		instruction.WriteString("🔄 **STEP 2: แนะนำบริการและยืนยันความต้องการ**\n\n")
+		instruction.WriteString("**สิ่งที่คุณต้องทำ:**\n")
+		instruction.WriteString("• อธิบายบริการที่แนะนำตามปัญหาที่พบ\n")
+		instruction.WriteString("• สอบถามข้อมูลเพิ่มเติม:\n")
+		instruction.WriteString("  - ขนาดที่แน่นอน\n")
+		instruction.WriteString("  - ประเภทลูกค้า (ใหม่/สมาชิก)\n")
+		instruction.WriteString("  - ต้องการแพคเพจไหม (คูปอง/สัญญา)\n")
+		instruction.WriteString("• รอการยืนยันก่อนเรียกใช้ get_ncs_pricing\n\n")
+		instruction.WriteString("**ห้ามทำ:**\n")
+		instruction.WriteString("• ไม่เรียกใช้ get_ncs_pricing จนกว่าจะได้ข้อมูลครบ\n")
+		instruction.WriteString("• ไม่ข้ามไปขั้นตอนจองทันที\n\n")
+		instruction.WriteString("**ตัวอย่างการตอบ:**\n")
+		instruction.WriteString("\"ตามที่วิเคราะห์แล้ว แนะนำบริการ[ชื่อบริการ] เพื่อแก้ปัญหา[ปัญหา] ขอทราบข้อมูลเพิ่มเติมหน่อยนะคะ:\n")
+		instruction.WriteString("1. ขนาดที่แน่นอน เช่น 3ฟุต 6ฟุต หรือ 2ที่นั่ง\n")
+		instruction.WriteString("2. คุณเป็นลูกค้าใหม่ หรือสมาชิกแล้วคะ?\n")
+		instruction.WriteString("3. สนใจแพคเพจประหยัดไหมคะ?\"\n\n")
+		instruction.WriteString("**Step ถัดไป:** เมื่อได้ข้อมูลครบ ให้เรียกใช้ getWorkflowStepInstruction(3, ...)")
+
+	case 3:
+		// Step 3: Pricing calculation and quotation
+		instruction.WriteString("🔄 **STEP 3: คำนวณราคาและเสนอใบเสนอราคา**\n\n")
+		instruction.WriteString("**สิ่งที่คุณต้องทำ:**\n")
+		instruction.WriteString("• เรียกใช้ get_ncs_pricing พร้อมข้อมูลที่ได้รับ\n")
+		instruction.WriteString("• แสดงราคาให้ลูกค้าดู\n")
+		instruction.WriteString("• อธิบายรายละเอียดบริการ\n")
+		instruction.WriteString("• แนะนำโปรโมชั่นหากมี\n")
+		instruction.WriteString("• สอบถามการตัดสินใจ\n\n")
+		instruction.WriteString("**ห้ามทำ:**\n")
+		instruction.WriteString("• ไม่เรียกใช้ get_available_slots_with_months ยัง\n")
+		instruction.WriteString("• ไม่บังคับให้จองทันที\n\n")
+		instruction.WriteString("**ตัวอย่างการตอบ:**\n")
+		instruction.WriteString("\"ราคาบริการสำหรับคุณค่ะ: [ผลจาก get_ncs_pricing]\n")
+		instruction.WriteString("รายละเอียดบริการ: [อธิบายสิ่งที่จะได้รับ]\n")
+		instruction.WriteString("ระยะเวลา: [เวลาที่ใช้]\n")
+		instruction.WriteString("หากคุณพอใจกับราคา เราสามารถดูวันว่างให้ได้เลยค่ะ\"\n\n")
+		instruction.WriteString("**Step ถัดไป:** เมื่อลูกค้าพอใจราคา ให้เรียกใช้ getWorkflowStepInstruction(4, ...)")
+
+	case 4:
+		// Step 4: Schedule checking and booking
+		instruction.WriteString("🔄 **STEP 4: ตรวจสอบตารางและจองคิว**\n\n")
+		instruction.WriteString("**สิ่งที่คุณต้องทำ:**\n")
+		instruction.WriteString("• สอบถามเดือนที่ต้องการ\n")
+		instruction.WriteString("• เรียกใช้ get_available_slots_with_months\n")
+		instruction.WriteString("• แสดงวันว่างให้ลูกค้าเลือก\n")
+		instruction.WriteString("• ยืนยันข้อมูลการจอง\n")
+		instruction.WriteString("• แนะนำการชำระมัดจำ\n\n")
+		instruction.WriteString("**ห้ามทำ:**\n")
+		instruction.WriteString("• ไม่ยืนยันการจองจนกว่าลูกค้าจะเลือกวันชัดเจน\n")
+		instruction.WriteString("• ไม่ข้ามขั้นตอนชำระเงิน\n\n")
+		instruction.WriteString("**ตัวอย่างการตอบ:**\n")
+		instruction.WriteString("\"ดีค่ะ! ขอทราบว่าต้องการใช้บริการช่วงเดือนไหนคะ?\n")
+		instruction.WriteString("(หลังลูกค้าตอบ) ให้ฉันตรวจสอบวันว่างในเดือน[เดือน]ให้นะคะ\"\n")
+		instruction.WriteString("จากนั้นเรียกใช้ get_available_slots_with_months\n\n")
+		instruction.WriteString("**Step ถัดไป:** เมื่อเลือกวันเสร็จ ให้เรียกใช้ getWorkflowStepInstruction(5, ...)")
+
+	case 5:
+		// Step 5: Final confirmation and payment
+		instruction.WriteString("🔄 **STEP 5: ยืนยันการจองและชำระเงิน**\n\n")
+		instruction.WriteString("**สิ่งที่คุณต้องทำ:**\n")
+		instruction.WriteString("• สรุปรายละเอียดการจองทั้งหมด\n")
+		instruction.WriteString("• ยืนยันวันเวลา ที่อยู่ เบอร์ติดต่อ\n")
+		instruction.WriteString("• แจ้งยอดมัดจำ\n")
+		instruction.WriteString("• ให้ข้อมูลการชำระเงิน\n")
+		instruction.WriteString("• แจ้งขั้นตอนถัดไป\n\n")
+		instruction.WriteString("**ตัวอย่างการตอบ:**\n")
+		instruction.WriteString("\"สรุปการจองของคุณค่ะ:\n")
+		instruction.WriteString("📋 บริการ: [ชื่อบริการ]\n")
+		instruction.WriteString("📅 วันเวลา: [วันที่เลือก]\n")
+		instruction.WriteString("💰 ราคา: [ราคารวม]\n")
+		instruction.WriteString("💳 มัดจำ: [จำนวนมัดจำ]\n")
+		instruction.WriteString("กรุณาชำระมัดจำผ่าน [ช่องทางชำระ] และส่งสลิปมาเพื่อยืนยันการจองค่ะ\"\n\n")
+		instruction.WriteString("**Step ถัดไป:** รอการยืนยันชำระเงิน - กลับไป Step 1 สำหรับลูกค้าใหม่")
+
+	default:
+		// Default: Redirect to appropriate step
+		instruction.WriteString("🔄 **STEP MANAGEMENT: กำหนดขั้นตอนใหม่**\n\n")
+		instruction.WriteString("**วิเคราะห์สถานการณ์:**\n")
+		if strings.Contains(strings.ToLower(userMessage), "รูปภาพ") || strings.Contains(userMessage, "ภาพ") || imageAnalysis != "" {
+			instruction.WriteString("• พบการส่งรูปภาพ → เรียกใช้ getWorkflowStepInstruction(1, ...)\n")
+		} else if strings.Contains(strings.ToLower(userMessage), "ราคา") || strings.Contains(userMessage, "เท่าไหร่") {
+			instruction.WriteString("• สอบถามราคา → เรียกใช้ getWorkflowStepInstruction(2, ...)\n")
+		} else if strings.Contains(strings.ToLower(userMessage), "จอง") || strings.Contains(userMessage, "คิว") {
+			instruction.WriteString("• ต้องการจอง → เรียกใช้ getWorkflowStepInstruction(4, ...)\n")
+		} else {
+			instruction.WriteString("• ทักทายทั่วไป → เรียกใช้ getWorkflowStepInstruction(1, ...)\n")
+		}
+		instruction.WriteString("\n**กรุณาเรียกใช้ getWorkflowStepInstruction ใหม่ด้วยขั้นตอนที่ถูกต้อง**")
+	}
+
+	return instruction.String()
+}
+
+// getCurrentWorkflowStep analyzes user message and context to determine current step
+func getCurrentWorkflowStep(userMessage, imageAnalysis, previousContext string) int {
+	log.Printf("getCurrentWorkflowStep called with: userMessage='%s', imageAnalysis='%s', previousContext='%s'",
+		userMessage, imageAnalysis, previousContext)
+
+	// Step 1: Image analysis or initial contact
+	if imageAnalysis != "" || strings.Contains(strings.ToLower(userMessage), "รูปภาพ") || strings.Contains(userMessage, "ภาพ") {
+		return 1
+	}
+
+	// Step 2: Service inquiry after image analysis
+	if strings.Contains(strings.ToLower(previousContext), "step 1") &&
+		(strings.Contains(strings.ToLower(userMessage), "บริการ") ||
+			strings.Contains(userMessage, "ขนาด") ||
+			strings.Contains(userMessage, "ต้องการ")) {
+		return 2
+	}
+
+	// Step 3: Price inquiry
+	if strings.Contains(strings.ToLower(userMessage), "ราคา") ||
+		strings.Contains(userMessage, "เท่าไหร่") ||
+		strings.Contains(userMessage, "ค่าใช้จ่าย") {
+		return 3
+	}
+
+	// Step 4: Booking inquiry
+	if strings.Contains(strings.ToLower(userMessage), "จอง") ||
+		strings.Contains(userMessage, "คิว") ||
+		strings.Contains(userMessage, "วันไหน") ||
+		strings.Contains(userMessage, "ว่าง") {
+		return 4
+	}
+
+	// Step 5: Confirmation
+	if strings.Contains(strings.ToLower(userMessage), "ยืนยัน") ||
+		strings.Contains(userMessage, "ตกลง") ||
+		strings.Contains(userMessage, "ชำระ") {
+		return 5
+	}
+
+	// Default to step 1 for new conversations
+	return 1
+}
+
+// getActionStepSummary provides step-by-step guidance before taking action based on image analysis
+func getActionStepSummary(analysisType, itemIdentified, conditionAssessed, recommendedService string) string {
+	log.Printf("getActionStepSummary called with: analysisType='%s', itemIdentified='%s', conditionAssessed='%s', recommendedService='%s'",
+		analysisType, itemIdentified, conditionAssessed, recommendedService)
+
+	// Validate inputs
+	if analysisType == "" || itemIdentified == "" {
+		return "ข้อมูลไม่ครบถ้วน กรุณาระบุประเภทการวิเคราะห์และสิ่งที่ตรวจพบ"
+	}
+
+	var stepSummary strings.Builder
+	stepSummary.WriteString("📋 **สรุปขั้นตอนการดำเนินการ**\n\n")
+
+	// Step 1: Analysis confirmation
+	stepSummary.WriteString("🔍 **ขั้นตอนที่ 1: ยืนยันการวิเคราะห์**\n")
+	stepSummary.WriteString(fmt.Sprintf("• วิเคราะห์รูปภาพ: %s\n", analysisType))
+	stepSummary.WriteString(fmt.Sprintf("• สิ่งที่ตรวจพบ: %s\n", itemIdentified))
+	if conditionAssessed != "" {
+		stepSummary.WriteString(fmt.Sprintf("• สภาพที่ประเมิน: %s\n", conditionAssessed))
+	}
+	stepSummary.WriteString("\n")
+
+	// Step 2: Service recommendation
+	stepSummary.WriteString("💡 **ขั้นตอนที่ 2: คำแนะนำบริการ**\n")
+	if recommendedService != "" {
+		stepSummary.WriteString(fmt.Sprintf("• บริการที่แนะนำ: %s\n", recommendedService))
+
+		// Add specific guidance based on service type
+		switch strings.ToLower(recommendedService) {
+		case "disinfection", "กำจัดเชื้อโรค":
+			stepSummary.WriteString("• เหมาะสำหรับ: กำจัดเชื้อโรค ไรฝุ่น และแบคทีเรีย\n")
+			stepSummary.WriteString("• ระยะเวลา: ประมาณ 2-3 ชั่วโมง\n")
+		case "washing", "ซักขจัดคราบ":
+			stepSummary.WriteString("• เหมาะสำหรับ: ขจัดคราบสกปรก กลิ่น และฟื้นฟูผ้า\n")
+			stepSummary.WriteString("• ระยะเวลา: ประมาณ 4-6 ชั่วโมง\n")
+		case "both", "ทั้งสองบริการ":
+			stepSummary.WriteString("• บริการครบวงจร: กำจัดเชื้อโรค + ซักขจัดคราบ\n")
+			stepSummary.WriteString("• ระยะเวลา: ประมาณ 6-8 ชั่วโมง\n")
+		}
+	} else {
+		stepSummary.WriteString("• กรุณาระบุบริการที่ต้องการ\n")
+	}
+	stepSummary.WriteString("\n")
+
+	// Step 3: Next actions
+	stepSummary.WriteString("📞 **ขั้นตอนที่ 3: การดำเนินการต่อไป**\n")
+	stepSummary.WriteString("• สอบถามราคาและรายละเอียดเพิ่มเติม\n")
+	stepSummary.WriteString("• เลือกวันเวลาที่สะดวก\n")
+	stepSummary.WriteString("• ยืนยันการจองและชำระมัดจำ\n")
+	stepSummary.WriteString("\n")
+
+	// Additional recommendations
+	stepSummary.WriteString("💭 **คำแนะนำเพิ่มเติม**\n")
+	if strings.Contains(strings.ToLower(itemIdentified), "mattress") || strings.Contains(itemIdentified, "ที่นอน") {
+		stepSummary.WriteString("• ควรทำความสะอาดที่นอนทุก 6-12 เดือน\n")
+		stepSummary.WriteString("• หากมีปัญหาไรฝุ่น แนะนำบริการกำจัดเชื้อโรค\n")
+	} else if strings.Contains(strings.ToLower(itemIdentified), "sofa") || strings.Contains(itemIdentified, "โซฟา") {
+		stepSummary.WriteString("• ควรทำความสะอาดโซฟาทุก 6-9 เดือน\n")
+		stepSummary.WriteString("• หากมีคราบสกปรก แนะนำบริการซักขจัดคราบ\n")
+	} else if strings.Contains(strings.ToLower(itemIdentified), "curtain") || strings.Contains(itemIdentified, "ม่าน") {
+		stepSummary.WriteString("• ควรทำความสะอาดม่านทุก 3-6 เดือน\n")
+		stepSummary.WriteString("• หากเป็นผ้าบาง ใช้บริการซักขจัดคราบ\n")
+	}
+
+	stepSummary.WriteString("• หากมีข้อสงสัย กรุณาสอบถามเจ้าหน้าที่\n")
+	stepSummary.WriteString("• สามารถขอดูผลงานก่อนหน้าได้\n\n")
+
+	stepSummary.WriteString("❓ **ต้องการดำเนินการขั้นตอนไหนต่อไป?**")
+
+	return stepSummary.String()
+}
+
+// getImageAnalysisGuidance provides guidance for image analysis process
+func getImageAnalysisGuidance(imageType, analysisRequest string) string {
+	log.Printf("getImageAnalysisGuidance called with: imageType='%s', analysisRequest='%s'",
+		imageType, analysisRequest)
+
+	var guidance strings.Builder
+	guidance.WriteString("🔍 **แนวทางการวิเคราะห์รูปภาพ**\n\n")
+
+	// Analysis checklist
+	guidance.WriteString("📝 **รายการตรวจสอบ**\n")
+	guidance.WriteString("• ประเภทสิ่งของ: (ที่นอน/โซฟา/ม่าน/พรม)\n")
+	guidance.WriteString("• ขนาดโดยประมาณ: (3ฟุต/6ฟุต/2ที่นั่ง ฯลฯ)\n")
+	guidance.WriteString("• สภาพปัจจุบัน: (สะอาด/สกปรก/มีคราบ/มีกลิ่น)\n")
+	guidance.WriteString("• ปัญหาที่พบ: (ไรฝุ่น/คราบ/กลิ่น/เชื้อโรค)\n")
+	guidance.WriteString("• ความเร่งด่วน: (ปกติ/เร่งด่วน)\n\n")
+
+	// Recommended analysis approach
+	guidance.WriteString("🎯 **วิธีการวิเคราะห์**\n")
+	if strings.Contains(strings.ToLower(imageType), "mattress") || strings.Contains(imageType, "ที่นอน") {
+		guidance.WriteString("• ตรวจสอบคราบเหลือง (เหงื่อ/ปัสสาวะ)\n")
+		guidance.WriteString("• ดูรอยดำ (เชื้อรา/ความชื้น)\n")
+		guidance.WriteString("• ประเมินอายุการใช้งาน\n")
+	} else if strings.Contains(strings.ToLower(imageType), "sofa") || strings.Contains(imageType, "โซฟา") {
+		guidance.WriteString("• ตรวจสอบผ้าหุ้ม (ผ้า/หนัง/หนังเทียม)\n")
+		guidance.WriteString("• ดูคราบอาหาร/เครื่องดื่ม\n")
+		guidance.WriteString("• ประเมินความสึกหรอ\n")
+	} else if strings.Contains(strings.ToLower(imageType), "curtain") || strings.Contains(imageType, "ม่าน") {
+		guidance.WriteString("• ตรวจสอบฝุ่นและคราบ\n")
+		guidance.WriteString("• ดูความหนาของผ้า\n")
+		guidance.WriteString("• ประเมินวิธีการซัก\n")
+	}
+
+	guidance.WriteString("\n💡 **คำแนะนำบริการ**\n")
+	guidance.WriteString("• หากมีไรฝุ่น/เชื้อโรค → บริการกำจัดเชื้อโรค\n")
+	guidance.WriteString("• หากมีคราบ/กลิ่น → บริการซักขจัดคราบ\n")
+	guidance.WriteString("• หากมีทั้งสองปัญหา → บริการครบวงจร\n\n")
+
+	guidance.WriteString("📞 **ขั้นตอนต่อไป**\n")
+	guidance.WriteString("• วิเคราะห์รูปภาพตามแนวทาง\n")
+	guidance.WriteString("• แนะนำบริการที่เหมาะสม\n")
+	guidance.WriteString("• เรียกใช้ get_action_step_summary\n")
+	guidance.WriteString("• ดำเนินการตามขั้นตอน")
+
+	return guidance.String()
 }
 
 // Helper functions for JSON-based pricing

@@ -1,0 +1,168 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_workflow_step_instruction",
+      "description": "Get step-by-step instructions for managing customer conversation workflow. Use this at the beginning of every conversation turn to know exactly what to do at each step. This ensures you follow the proper sales process and don't skip important steps.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "current_step": {
+            "type": "integer",
+            "description": "Current workflow step number (1-5): 1=Image Analysis, 2=Service Recommendation, 3=Pricing, 4=Scheduling, 5=Confirmation",
+            "enum": [1, 2, 3, 4, 5]
+          },
+          "user_message": {
+            "type": "string",
+            "description": "The customer's current message or request"
+          },
+          "image_analysis": {
+            "type": "string",
+            "description": "Result of image analysis if customer sent a photo (e.g., 'ที่นอน 6ฟุต มีคราบเหลือง')"
+          },
+          "previous_context": {
+            "type": "string",
+            "description": "Previous conversation context or steps completed"
+          }
+        },
+        "required": ["current_step", "user_message"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_current_workflow_step",
+      "description": "Automatically detect which workflow step should be used based on customer message and context. Use this when you're unsure about the current step or need to determine the appropriate workflow stage.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "user_message": {
+            "type": "string",
+            "description": "The customer's message"
+          },
+          "image_analysis": {
+            "type": "string",
+            "description": "Image analysis result if customer sent a photo"
+          },
+          "previous_context": {
+            "type": "string",
+            "description": "Previous conversation context"
+          }
+        },
+        "required": ["user_message"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_action_step_summary",
+      "description": "Create a detailed action plan summary after analyzing customer images. Use this in Step 1 after image analysis to provide structured next steps.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "analysis_type": {
+            "type": "string",
+            "description": "Type of analysis performed (e.g., 'รูปภาพที่นอน', 'วิเคราะห์โซฟา')"
+          },
+          "item_identified": {
+            "type": "string",
+            "description": "Item identified from the image (e.g., 'ที่นอน 6ฟุต', 'โซฟา 3ที่นั่ง')"
+          },
+          "condition_assessed": {
+            "type": "string",
+            "description": "Condition assessment of the item (e.g., 'มีคราบเหลือง', 'สกปรกมาก', 'มีกลิ่น')"
+          },
+          "recommended_service": {
+            "type": "string",
+            "description": "Recommended service based on analysis (e.g., 'ซักขจัดคราบ', 'กำจัดเชื้อโรค', 'ทั้งสองบริการ')"
+          }
+        },
+        "required": ["analysis_type", "item_identified"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_image_analysis_guidance",
+      "description": "Get guidance for analyzing customer images when the analysis is unclear or needs structure. Use this to get a checklist and analysis framework.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "image_type": {
+            "type": "string",
+            "description": "Type of image being analyzed (e.g., 'ที่นอน', 'โซฟา', 'ม่าน')"
+          },
+          "analysis_request": {
+            "type": "string",
+            "description": "Specific analysis request or question about the image"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_ncs_pricing",
+      "description": "Get pricing information for NCS cleaning services. Use this in Step 3 only after collecting complete customer requirements (service type, item, size, customer type).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "service_type": {
+            "type": "string",
+            "description": "Type of cleaning service",
+            "enum": ["disinfection", "washing", "กำจัดเชื้อโรค", "ซักขจัดคราบ"]
+          },
+          "item_type": {
+            "type": "string",
+            "description": "Type of item to be cleaned",
+            "enum": ["mattress", "sofa", "curtain", "carpet", "ที่นอน", "โซฟา", "ม่าน", "พรม"]
+          },
+          "size": {
+            "type": "string",
+            "description": "Size specification (e.g., '3ฟุต', '6ฟุต', '2ที่นั่ง', '1ตรม')"
+          },
+          "customer_type": {
+            "type": "string",
+            "description": "Customer type",
+            "enum": ["new", "member", "ลูกค้าใหม่", "สมาชิก"],
+            "default": "new"
+          },
+          "package_type": {
+            "type": "string",
+            "description": "Package type",
+            "enum": ["regular", "coupon", "contract", "ปกติ", "คูปอง", "สัญญา"],
+            "default": "regular"
+          },
+          "quantity": {
+            "type": "integer",
+            "description": "Quantity for package deals",
+            "default": 1
+          }
+        },
+        "required": ["service_type", "item_type"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_available_slots_with_months",
+      "description": "Check available appointment slots for scheduling. Use this in Step 4 only after customer approves the pricing and wants to book an appointment.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "thai_month_year": {
+            "type": "string",
+            "description": "Thai month and year for availability check (e.g., 'ตุลาคม 2567', 'พฤศจิกายน 2567')"
+          }
+        },
+        "required": ["thai_month_year"]
+      }
+    }
+  }
+]
