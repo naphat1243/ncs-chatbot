@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -299,7 +300,7 @@ func getLineImageURL(messageID string) (string, error) {
 	const maxImageSize = 20 * 1024 * 1024 // 20MB
 	if len(imageData) > maxImageSize {
 		log.Printf("⚠️ Image too large (%d bytes > %d bytes). Attempting to resize...", len(imageData), maxImageSize)
-		
+
 		// Try to compress/resize the image (basic approach)
 		// For production, you might want to use a proper image processing library
 		// For now, we'll truncate or reject very large images
@@ -316,17 +317,96 @@ func getLineImageURL(messageID string) (string, error) {
 	// Convert to base64 data URL for GPT-4 Vision
 	base64Data := base64.StdEncoding.EncodeToString(imageData)
 	dataURL := fmt.Sprintf("data:%s;base64,%s", contentType, base64Data)
-	
+
 	// Check final data URL length (OpenAI has limits on data URL size)
 	const maxDataURLLength = 1000000 // ~1MB base64 encoded
 	if len(dataURL) > maxDataURLLength {
 		log.Printf("⚠️ Data URL too long (%d chars > %d chars)", len(dataURL), maxDataURLLength)
 		return "", fmt.Errorf("รูปภาพมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปภาพแล้วลองใหม่อีกครั้ง")
 	}
-	
+
 	log.Printf("✅ Successfully created data URL. Length: %d characters", len(dataURL))
 
 	return dataURL, nil
+}
+
+// parseDataURL decodes a data URL (e.g., data:image/jpeg;base64,...) into content type and raw bytes
+func parseDataURL(dataURL string) (string, []byte, error) {
+	if !strings.HasPrefix(dataURL, "data:") {
+		return "", nil, fmt.Errorf("not a data URL")
+	}
+	// Split metadata and payload
+	parts := strings.SplitN(dataURL, ",", 2)
+	if len(parts) != 2 {
+		return "", nil, fmt.Errorf("invalid data URL format")
+	}
+	meta := parts[0] // e.g., data:image/jpeg;base64
+	payload := parts[1]
+	if !strings.Contains(meta, ";base64") {
+		return "", nil, fmt.Errorf("only base64 data URLs are supported")
+	}
+	// Extract content type
+	meta = strings.TrimPrefix(meta, "data:")
+	ct := meta
+	if semi := strings.Index(ct, ";"); semi != -1 {
+		ct = ct[:semi]
+	}
+	// Decode
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to decode base64: %w", err)
+	}
+	return ct, decoded, nil
+}
+
+// uploadImageFileToOpenAI uploads image bytes to OpenAI Files API and returns file_id for Assistants
+func uploadImageFileToOpenAI(client *http.Client, apiKey string, filename string, data []byte) (string, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// purpose must be "assistants" for Assistants API
+	if err := writer.WriteField("purpose", "assistants"); err != nil {
+		return "", fmt.Errorf("failed to write purpose: %w", err)
+	}
+	fw, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return "", fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		return "", fmt.Errorf("failed to write file data: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/files", &buf)
+	if err != nil {
+		return "", fmt.Errorf("failed to create upload request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to upload file: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		log.Printf("❌ File upload failed. Status=%d Body=%s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("file upload failed: %s", resp.Status)
+	}
+	var obj struct {
+		ID       string `json:"id"`
+		Object   string `json:"object"`
+		Filename string `json:"filename"`
+	}
+	_ = json.Unmarshal(body, &obj)
+	if obj.ID == "" {
+		return "", fmt.Errorf("file_id missing in upload response")
+	}
+	log.Printf("✅ Uploaded image to OpenAI. file_id=%s filename=%s", obj.ID, obj.Filename)
+	return obj.ID, nil
 }
 
 // isErrorResponse checks if a response is an error message that shouldn't be cached
@@ -434,27 +514,51 @@ func getAssistantResponse(userId, message string) string {
 			log.Printf("❌ ERROR: Could not find data:image in message")
 			return "ขออภัย ไม่สามารถประมวลผลรูปภาพได้ กรุณาลองใหม่อีกครั้ง"
 		}
-		
+
 		imageURL := message[imageStartIndex:] // Extract URL from "data:image..."
 		log.Printf("🔍 Image URL extracted - Length: %d characters", len(imageURL))
-		
+
 		// Check if image data URL is too large for OpenAI API
 		const maxDataURLLength = 1000000 // ~1MB base64 encoded
 		if len(imageURL) > maxDataURLLength {
 			log.Printf("⚠️ Data URL too long (%d chars > %d chars) - rejecting", len(imageURL), maxDataURLLength)
 			return "ขออภัย รูปภาพมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปภาพหรือถ่ายรูปใหม่ให้เล็กกว่านี้แล้วลองใหม่อีกครั้งค่ะ 📸"
 		}
-		
+
 		// Validate data URL format
 		if !strings.HasPrefix(imageURL, "data:image/") {
 			log.Printf("❌ ERROR: Invalid data URL format: %s", imageURL[:50])
 			return "ขออภัย รูปแบบรูปภาพไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง"
-		}		// Show preview of image URL (first 100 chars or less)
+		} // Show preview of image URL (first 100 chars or less)
 		previewLen := 100
 		if len(imageURL) < previewLen {
 			previewLen = len(imageURL)
 		}
 		log.Printf("🎯 Image URL preview: %s...", imageURL[:previewLen])
+
+		// Convert data URL to bytes and upload via Files API
+		ct, imgBytes, err := parseDataURL(imageURL)
+		if err != nil {
+			log.Printf("❌ Failed to parse data URL: %v", err)
+			return "ขออภัย ไม่สามารถอ่านรูปภาพได้ กรุณาลองใหม่อีกครั้ง"
+		}
+		// Derive filename extension from content type
+		filename := "customer-image"
+		if strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
+			filename += ".jpg"
+		}
+		if strings.Contains(ct, "png") {
+			filename += ".png"
+		}
+		if strings.Contains(ct, "webp") {
+			filename += ".webp"
+		}
+
+		fileID, err := uploadImageFileToOpenAI(client, apiKey, filename, imgBytes)
+		if err != nil {
+			log.Printf("❌ Failed to upload image to OpenAI: %v", err)
+			return "ขออภัย ระบบอัปโหลดรูปภาพมีปัญหา กรุณาลองใหม่อีกครั้งค่ะ"
+		}
 
 		msgReq = map[string]interface{}{
 			"role": "user",
@@ -464,14 +568,14 @@ func getAssistantResponse(userId, message string) string {
 					"text": fmt.Sprintf("ขณะนี้เวลา %s: ลูกค้าส่งรูปภาพมา กรุณาวิเคราะห์รูปภาพและให้คำแนะนำเกี่ยวกับบริการทำความสะอาดที่เหมาะสม", timeStr),
 				},
 				{
-					"type": "image_url",
-					"image_url": map[string]string{
-						"url": imageURL,
+					"type": "image_file",
+					"image_file": map[string]string{
+						"file_id": fileID,
 					},
 				},
 			},
 		}
-		log.Printf("✅ VISION REQUEST PREPARED: Content has %d parts (text + image)", len(msgReq["content"].([]map[string]interface{})))
+		log.Printf("✅ VISION REQUEST PREPARED (image_file). file_id=%s", fileID)
 	} else {
 		// Handle text message
 		msgReq = map[string]interface{}{
