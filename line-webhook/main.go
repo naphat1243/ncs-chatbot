@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -351,12 +352,33 @@ func parseDataURL(dataURL string) (string, []byte, error) {
 	if semi := strings.Index(ct, ";"); semi != -1 {
 		ct = ct[:semi]
 	}
+	// Sanitize payload: keep only valid base64 chars (A-Za-z0-9+/=)
+	if idx := strings.IndexByte(payload, ' '); idx != -1 {
+		payload = payload[:idx]
+	}
+	b64re := regexp.MustCompile(`[A-Za-z0-9+/=]+`)
+	match := b64re.FindString(payload)
+	if match == "" {
+		return "", nil, fmt.Errorf("no valid base64 payload found")
+	}
 	// Decode
-	decoded, err := base64.StdEncoding.DecodeString(payload)
+	decoded, err := base64.StdEncoding.DecodeString(match)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to decode base64: %w", err)
 	}
 	return ct, decoded, nil
+}
+
+// extractFirstDataURL finds the first valid image data URL in a string and returns it exactly
+func extractFirstDataURL(s string) (string, error) {
+	// Match data:image/<type>;base64,<payload>
+	// base64 payload restricted to valid chars only to avoid trailing list/bracket artifacts
+	re := regexp.MustCompile(`data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+`)
+	loc := re.FindStringIndex(s)
+	if loc == nil {
+		return "", fmt.Errorf("no image data URL found")
+	}
+	return s[loc[0]:loc[1]], nil
 }
 
 // uploadImageFileToOpenAI uploads image bytes to OpenAI Files API and returns file_id for Assistants
@@ -508,14 +530,12 @@ func getAssistantResponse(userId, message string) string {
 		// Handle image message with vision
 		log.Printf("🖼️ DETECTED IMAGE MESSAGE: preparing vision request")
 
-		// Find the start of the data URL
-		imageStartIndex := strings.Index(message, "data:image")
-		if imageStartIndex == -1 {
-			log.Printf("❌ ERROR: Could not find data:image in message")
+		// Extract the exact data URL safely (avoid trailing characters)
+		imageURL, err := extractFirstDataURL(message)
+		if err != nil {
+			log.Printf("❌ ERROR: %v", err)
 			return "ขออภัย ไม่สามารถประมวลผลรูปภาพได้ กรุณาลองใหม่อีกครั้ง"
 		}
-
-		imageURL := message[imageStartIndex:] // Extract URL from "data:image..."
 		log.Printf("🔍 Image URL extracted - Length: %d characters", len(imageURL))
 
 		// Check if image data URL is too large for OpenAI API
