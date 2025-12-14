@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -19,7 +21,11 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/filesystem"
 )
+
+//go:embed admin-ui/*
+var adminUI embed.FS
 
 // PricingConfig represents the JSON pricing configuration structure
 type PricingConfig struct {
@@ -496,7 +502,16 @@ func main() {
 	}
 
 	app := fiber.New()
-	app.Static("/admin-ui", "./admin-ui", fiber.Static{Index: "index.html"})
+
+	// Serve embedded admin UI
+	adminUIFS, err := fs.Sub(adminUI, "admin-ui")
+	if err != nil {
+		log.Fatal("Failed to load admin UI:", err)
+	}
+	app.Use("/admin-ui", filesystem.New(filesystem.Config{
+		Root:  http.FS(adminUIFS),
+		Index: "index.html",
+	}))
 
 	adminGroup := app.Group("/admin", adminAuthMiddleware)
 	adminGroup.Get("/config/pricing", handleGetPricingConfig)
