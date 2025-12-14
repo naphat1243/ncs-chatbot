@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NCS Admin - จัดการราคาและโปรโมชั่น</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+    <div class="page">
+        <header class="hero">
+            <div>
+                <p class="eyebrow">NCS Cleaning Concierge</p>
+                <h1>💰 ราคาและโปรโมชั่น</h1>
+                <p class="subtitle">เปลี่ยนราคาบริการ แก้ไขโปรโมชั่น และจัดการราคาพิเศษได้ง่ายๆ ไม่ต้องเขียนโค้ด</p>
+            </div>
+            <div class="token-card">
+                <div class="token-header">
+                    <label for="adminToken">🔐 รหัสผ่านแอดมิน</label>
+                    <span class="status-badge" id="tokenStatus">ยังไม่ได้ใส่รหัส</span>
+                </div>
+                <div class="token-input">
+                    <input id="adminToken" type="password" placeholder="วางรหัสผ่านที่นี่" autocomplete="off" />
+                    <button id="saveTokenBtn" type="button">บันทึก</button>
+                </div>
+                <small>💡 รหัสผ่านจะถูกเก็บไว้ในเบราว์เซอร์ของคุณเท่านั้น</small>
+            </div>
+        </header>
+
+        <main class="grid">
+                <section class="card wide" id="overviewCard">
+                    <header>
+                        <div>
+                            <h2>📊 ข้อมูลปัจจุบัน</h2>
+                            <p>ข้อมูลราคาและโปรโมชั่นทั้งหมดที่กำลังใช้งานอยู่ตอนนี้</p>
+                        </div>
+                        <div class="actions">
+                            <button id="refreshConfigBtn" type="button">🔄 รีเฟรช</button>
+                        </div>
+                    </header>
+                    <div class="pill-section">
+                        <h3>🧹 บริการทำความสะอาด</h3>
+                        <div id="servicesList" class="pill-list" data-empty="ยังไม่มีบริการ"></div>
+                    </div>
+                    <div class="pill-section">
+                        <h3>👥 ประเภทลูกค้า</h3>
+                        <div id="customersList" class="pill-list" data-empty="ยังไม่มีประเภทลูกค้า"></div>
+                    </div>
+                </section>
+
+                <section class="card wide" id="priceTableSection">
+                    <header>
+                        <div>
+                            <h2>💰 ตารางราคาทั้งหมด</h2>
+                            <p>คลิกที่ราคาเพื่อแก้ไข - ข้อมูลจาก pricing_config.json</p>
+                        </div>
+                        <div class="actions">
+                            <button id="addNewPriceBtn" type="button" class="primary">➕ เพิ่มราคาใหม่</button>
+                        </div>
+                    </header>
+                    <div class="info-box">
+                        <strong>💡 วิธีใช้:</strong> คลิกที่ราคาในตารางเพื่อแก้ไข หรือกดปุ่ม "➕ เพิ่มราคาใหม่" เพื่อเพิ่มรายการใหม่
+                    </div>
+                    <div id="priceTableContainer" class="table-container">
+                        <table id="priceTable" class="price-table">
+                            <thead>
+                                <tr>
+                                    <th>สินค้า</th>
+                                    <th>ขนาด</th>
+                                    <th>บริการ</th>
+                                    <th>ลูกค้า</th>
+                                    <th>แพคเกจ</th>
+                                    <th>ราคาเต็ม</th>
+                                    <th>ลด 35%</th>
+                                    <th>ลด 50%</th>
+                                    <th>การจัดการ</th>
+                                </tr>
+                            </thead>
+                            <tbody id="priceTableBody">
+                                <tr>
+                                    <td colspan="9" class="empty-state">กำลังโหลดข้อมูล...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="card wide" id="promoTableSection">
+                    <header>
+                        <div>
+                            <h2>🎁 ตารางโปรโมชั่นทั้งหมด</h2>
+                            <p>คลิกที่ราคาเพื่อแก้ไข - แพคเกจคูปองและสัญญา</p>
+                        </div>
+                        <div class="actions">
+                            <button id="addNewPromoBtn" type="button" class="primary">➕ เพิ่มโปรโมชั่นใหม่</button>
+                        </div>
+                    </header>
+                    <div id="promoTableContainer" class="table-container">
+                        <table id="promoTable" class="price-table">
+                            <thead>
+                                <tr>
+                                    <th>แพคเกจ</th>
+                                    <th>บริการ</th>
+                                    <th>จำนวน</th>
+                                    <th>ราคาเต็ม</th>
+                                    <th>ส่วนลด</th>
+                                    <th>ราคาขาย</th>
+                                    <th>ต่อครั้ง</th>
+                                    <th>มัดจำ</th>
+                                    <th>การจัดการ</th>
+                                </tr>
+                            </thead>
+                            <tbody id="promoTableBody">
+                                <tr>
+                                    <td colspan="9" class="empty-state">กำลังโหลดข้อมูล...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="card subtle" id="advancedCard">
+                    <h2>⚙️ ขั้นสูง (สำหรับผู้เชี่ยวชาญ)</h2>
+                    <p>⚠️ ส่วนนี้สำหรับผู้ที่มีความรู้ด้านเทคนิคเท่านั้น - ไฟล์ JSON แบบเต็ม</p>
+                    <details>
+                        <summary>📄 แสดงไฟล์ JSON</summary>
+                        <div class="warning-box">
+                            <strong>⚠️ คำเตือน:</strong> การแก้ไขโดยตรงอาจทำให้ระบบเสียหายได้ ควรใช้ฟอร์มด้านบนแทน
+                        </div>
+                        <div class="actions compact">
+                            <button id="formatConfigBtn" type="button" class="ghost">🔧 จัดรูปแบบ JSON</button>
+                            <button id="saveFullConfigBtn" type="button" class="primary">💾 บันทึกทั้งหมด</button>
+                        </div>
+                        <textarea id="configEditor" spellcheck="false" placeholder="ข้อมูล JSON จะปรากฏที่นี่"></textarea>
+                    </details>
+                </section>
+            </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <!-- Modal สำหรับแก้ไข/เพิ่มราคา -->
+    <div id="priceModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="priceModalTitle">✏️ แก้ไขราคา</h2>
+                <button class="modal-close" onclick="closePriceModal()">&times;</button>
+            </div>
+            <form id="priceModalForm">
+                <input type="hidden" name="originalKey" id="originalKey" />
+                <div class="form-group">
+                    <label>🛋️ สินค้า</label>
+                    <select name="itemKey" id="modalItemSelect" required>
+                        <option value="">เลือกสินค้า</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>📏 ขนาด</label>
+                    <select name="sizeKey" id="modalSizeSelect" required>
+                        <option value="">เลือกขนาด</option>
+                    </select>
+                </div>
+                <div class="two-col">
+                    <div class="form-group">
+                        <label>🧹 บริการ</label>
+                        <select name="serviceKey" id="modalServiceSelect" required>
+                            <option value="">เลือกบริการ</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>👤 ประเภทลูกค้า</label>
+                        <select name="customerKey" id="modalCustomerSelect" required>
+                            <option value="">เลือกประเภท</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>📦 แพคเกจ</label>
+                    <input name="packageKey" id="modalPackageInput" value="regular" placeholder="regular" />
+                    <small class="hint">ปกติใช้ "regular"</small>
+                </div>
+                <div class="three-col">
+                    <div class="form-group">
+                        <label>💵 ราคาเต็ม</label>
+                        <input name="fullPrice" id="modalFullPrice" type="number" min="0" required />
+                    </div>
+                    <div class="form-group">
+                        <label>🏷️ ลด 35%</label>
+                        <input name="discount35" id="modalDiscount35" type="number" min="0" />
+                    </div>
+                    <div class="form-group">
+                        <label>🎉 ลด 50%</label>
+                        <input name="discount50" id="modalDiscount50" type="number" min="0" />
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="ghost" onclick="closePriceModal()">❌ ยกเลิก</button>
+                    <button type="submit" class="primary">💾 บันทึก</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal สำหรับแก้ไข/เพิ่มโปรโมชั่น -->
+    <div id="promoModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="promoModalTitle">✏️ แก้ไขโปรโมชั่น</h2>
+                <button class="modal-close" onclick="closePromoModal()">&times;</button>
+            </div>
+            <form id="promoModalForm">
+                <input type="hidden" name="originalKey" id="promoOriginalKey" />
+                <div class="two-col">
+                    <div class="form-group">
+                        <label>📦 แพคเกจ</label>
+                        <select name="packageKey" id="modalPromoPackageSelect" required>
+                            <option value="">เลือกแพคเกจ</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>🧹 บริการ</label>
+                        <select name="serviceKey" id="modalPromoServiceSelect" required>
+                            <option value="">เลือกบริการ</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>🔢 จำนวนครั้ง</label>
+                    <select name="quantity" id="modalPromoQuantitySelect" required>
+                        <option value="">เลือกจำนวน</option>
+                    </select>
+                </div>
+                <div class="three-col">
+                    <div class="form-group">
+                        <label>💵 ราคาเต็ม</label>
+                        <input name="fullPrice" id="modalPromoFullPrice" type="number" min="0" />
+                    </div>
+                    <div class="form-group">
+                        <label>🏷️ ส่วนลด</label>
+                        <input name="discount" id="modalPromoDiscount" type="number" min="0" />
+                    </div>
+                    <div class="form-group">
+                        <label>💰 ราคาขาย</label>
+                        <input name="salePrice" id="modalPromoSalePrice" type="number" min="0" required />
+                    </div>
+                </div>
+                <div class="two-col">
+                    <div class="form-group">
+                        <label>📊 ต่อครั้ง</label>
+                        <input name="perItem" id="modalPromoPerItem" type="number" min="0" />
+                    </div>
+                    <div class="form-group">
+                        <label>💳 มัดจำ</label>
+                        <input name="depositMin" id="modalPromoDeposit" type="number" min="0" />
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="ghost" onclick="closePromoModal()">❌ ยกเลิก</button>
+                    <button type="submit" class="primary">💾 บันทึก</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+</body>
+</html>

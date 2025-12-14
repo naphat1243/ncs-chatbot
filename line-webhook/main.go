@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,11 +72,88 @@ type CustomerTypeConfig struct {
 	Aliases []string `json:"aliases"`
 }
 
+const pricingConfigFile = "pricing_config.json"
+
 var pricingConfig *PricingConfig
+
+type UpdatePriceRequest struct {
+	ServiceKey  string      `json:"service_key"`
+	ItemKey     string      `json:"item_key"`
+	SizeKey     string      `json:"size_key"`
+	CustomerKey string      `json:"customer_key"`
+	PackageKey  string      `json:"package_key"`
+	Price       PriceConfig `json:"price"`
+}
+
+type UpdatePromotionRequest struct {
+	PackageKey string       `json:"package_key"`
+	ServiceKey string       `json:"service_key"`
+	Quantity   int          `json:"quantity"`
+	Price      PackagePrice `json:"price"`
+}
+
+func (r *UpdatePriceRequest) normalize() {
+	r.ServiceKey = strings.TrimSpace(r.ServiceKey)
+	r.ItemKey = strings.TrimSpace(r.ItemKey)
+	r.SizeKey = strings.TrimSpace(r.SizeKey)
+	r.CustomerKey = strings.TrimSpace(r.CustomerKey)
+	r.PackageKey = strings.TrimSpace(r.PackageKey)
+	if r.PackageKey == "" {
+		r.PackageKey = "regular"
+	}
+}
+
+func (r UpdatePriceRequest) validate() error {
+	if r.ServiceKey == "" {
+		return errors.New("service_key is required")
+	}
+	if r.ItemKey == "" {
+		return errors.New("item_key is required")
+	}
+	if r.SizeKey == "" {
+		return errors.New("size_key is required")
+	}
+	if r.CustomerKey == "" {
+		return errors.New("customer_key is required")
+	}
+	if !priceHasValue(r.Price) {
+		return errors.New("price must include at least one value")
+	}
+	return nil
+}
+
+func (r *UpdatePromotionRequest) normalize() {
+	r.PackageKey = strings.TrimSpace(r.PackageKey)
+	r.ServiceKey = strings.TrimSpace(r.ServiceKey)
+}
+
+func (r UpdatePromotionRequest) validate() error {
+	if r.PackageKey == "" {
+		return errors.New("package_key is required")
+	}
+	if r.ServiceKey == "" {
+		return errors.New("service_key is required")
+	}
+	if r.Quantity <= 0 {
+		return errors.New("quantity must be greater than zero")
+	}
+	if !packagePriceHasValue(r.Price) {
+		return errors.New("price must include at least one field")
+	}
+	return nil
+}
+
+func priceHasValue(p PriceConfig) bool {
+	return p.FullPrice > 0 || p.Discount35 > 0 || p.Discount50 > 0
+}
+
+func packagePriceHasValue(p PackagePrice) bool {
+	return p.FullPrice > 0 || p.Discount > 0 || p.SalePrice > 0 || p.PerItem > 0
+}
 
 // loadPricingConfig loads pricing configuration from JSON file
 func loadPricingConfig() error {
-	data, err := os.ReadFile("pricing_config.json")
+	data, err := os.ReadFile(pricingConfigFile)
 	if err != nil {
 		return fmt.Errorf("failed to read pricing config: %v", err)
 	}
@@ -83,8 +162,252 @@ func loadPricingConfig() error {
 	if err := json.Unmarshal(data, pricingConfig); err != nil {
 		return fmt.Errorf("failed to parse pricing config: %v", err)
 	}
+	sanitizePricingConfig(pricingConfig)
 
 	log.Println("Pricing configuration loaded successfully")
+	return nil
+}
+
+func sanitizePricingConfig(cfg *PricingConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Services == nil {
+		cfg.Services = make(map[string]ServiceConfig)
+	}
+	if cfg.Items == nil {
+		cfg.Items = make(map[string]ItemConfig)
+	}
+	if cfg.Packages == nil {
+		cfg.Packages = make(map[string]PackageConfig)
+	}
+	if cfg.CustomerTypes == nil {
+		cfg.CustomerTypes = make(map[string]CustomerTypeConfig)
+	}
+	for itemKey, item := range cfg.Items {
+		if item.Sizes == nil {
+			item.Sizes = make(map[string]SizeConfig)
+		}
+		for sizeKey, sizeCfg := range item.Sizes {
+			if sizeCfg.Pricing == nil {
+				sizeCfg.Pricing = make(map[string]map[string]map[string]PriceConfig)
+			}
+			for serviceKey, customerMap := range sizeCfg.Pricing {
+				if customerMap == nil {
+					sizeCfg.Pricing[serviceKey] = make(map[string]map[string]PriceConfig)
+					continue
+				}
+				for customerKey, packageMap := range customerMap {
+					if packageMap == nil {
+						customerMap[customerKey] = make(map[string]PriceConfig)
+					}
+				}
+			}
+			item.Sizes[sizeKey] = sizeCfg
+		}
+		cfg.Items[itemKey] = item
+	}
+	for pkgKey, pkg := range cfg.Packages {
+		if pkg.Disinfection == nil {
+			pkg.Disinfection = make(map[string]PackagePrice)
+		}
+		if pkg.Washing == nil {
+			pkg.Washing = make(map[string]PackagePrice)
+		}
+		cfg.Packages[pkgKey] = pkg
+	}
+}
+
+func savePricingConfigToFile(cfg *PricingConfig) error {
+	if cfg == nil {
+		return errors.New("pricing config is nil")
+	}
+	sanitizePricingConfig(cfg)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal pricing config: %w", err)
+	}
+	tmpPath := pricingConfigFile + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp config: %w", err)
+	}
+	if err := os.Rename(tmpPath, pricingConfigFile); err != nil {
+		return fmt.Errorf("failed to replace pricing config: %w", err)
+	}
+	return nil
+}
+
+func clonePricingConfig(cfg *PricingConfig) (*PricingConfig, error) {
+	if cfg == nil {
+		return nil, errors.New("pricing config is nil")
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to copy pricing config: %w", err)
+	}
+	clone := &PricingConfig{}
+	if err := json.Unmarshal(data, clone); err != nil {
+		return nil, fmt.Errorf("failed to rebuild clone: %w", err)
+	}
+	sanitizePricingConfig(clone)
+	return clone, nil
+}
+
+func respondError(c *fiber.Ctx, status int, message string) error {
+	return c.Status(status).JSON(fiber.Map{"error": message})
+}
+
+func adminAuthMiddleware(c *fiber.Ctx) error {
+	adminToken := os.Getenv("ADMIN_API_TOKEN")
+	if adminToken == "" {
+		log.Printf("ADMIN_API_TOKEN is not configured; rejecting admin request from %s", c.IP())
+		return respondError(c, fiber.StatusForbidden, "admin API is disabled")
+	}
+	provided := c.Get("X-Admin-Token")
+	if provided == "" || provided != adminToken {
+		return respondError(c, fiber.StatusUnauthorized, "invalid admin token")
+	}
+	return c.Next()
+}
+
+func handleGetPricingConfig(c *fiber.Ctx) error {
+	if pricingConfig == nil {
+		return respondError(c, fiber.StatusServiceUnavailable, "pricing config not loaded")
+	}
+	return c.JSON(pricingConfig)
+}
+
+func handleReplacePricingConfig(c *fiber.Ctx) error {
+	var incoming PricingConfig
+	if err := c.BodyParser(&incoming); err != nil {
+		return respondError(c, fiber.StatusBadRequest, "invalid JSON payload")
+	}
+	sanitizePricingConfig(&incoming)
+	if err := savePricingConfigToFile(&incoming); err != nil {
+		log.Printf("Failed to persist pricing config: %v", err)
+		return respondError(c, fiber.StatusInternalServerError, "unable to save pricing config")
+	}
+	pricingConfig = &incoming
+	return c.JSON(fiber.Map{
+		"status": "ok",
+		"config": pricingConfig,
+	})
+}
+
+func handleUpdatePriceEntry(c *fiber.Ctx) error {
+	if pricingConfig == nil {
+		return respondError(c, fiber.StatusServiceUnavailable, "pricing config not loaded")
+	}
+	var req UpdatePriceRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respondError(c, fiber.StatusBadRequest, "invalid JSON payload")
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		return respondError(c, fiber.StatusBadRequest, err.Error())
+	}
+	workingCopy, err := clonePricingConfig(pricingConfig)
+	if err != nil {
+		log.Printf("Failed to clone pricing config: %v", err)
+		return respondError(c, fiber.StatusInternalServerError, "unable to prepare pricing config")
+	}
+	if err := applyPriceUpdate(workingCopy, req); err != nil {
+		return respondError(c, fiber.StatusBadRequest, err.Error())
+	}
+	if err := savePricingConfigToFile(workingCopy); err != nil {
+		log.Printf("Failed to save pricing config: %v", err)
+		return respondError(c, fiber.StatusInternalServerError, "unable to persist pricing config")
+	}
+	pricingConfig = workingCopy
+	return c.JSON(fiber.Map{
+		"status": "ok",
+		"price":  req.Price,
+	})
+}
+
+func handleUpdatePromotionEntry(c *fiber.Ctx) error {
+	if pricingConfig == nil {
+		return respondError(c, fiber.StatusServiceUnavailable, "pricing config not loaded")
+	}
+	var req UpdatePromotionRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respondError(c, fiber.StatusBadRequest, "invalid JSON payload")
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		return respondError(c, fiber.StatusBadRequest, err.Error())
+	}
+	workingCopy, err := clonePricingConfig(pricingConfig)
+	if err != nil {
+		log.Printf("Failed to clone pricing config: %v", err)
+		return respondError(c, fiber.StatusInternalServerError, "unable to prepare pricing config")
+	}
+	if err := applyPromotionUpdate(workingCopy, req); err != nil {
+		return respondError(c, fiber.StatusBadRequest, err.Error())
+	}
+	if err := savePricingConfigToFile(workingCopy); err != nil {
+		log.Printf("Failed to save pricing config: %v", err)
+		return respondError(c, fiber.StatusInternalServerError, "unable to persist pricing config")
+	}
+	pricingConfig = workingCopy
+	return c.JSON(fiber.Map{
+		"status":    "ok",
+		"promotion": req.Price,
+	})
+}
+
+func applyPriceUpdate(cfg *PricingConfig, req UpdatePriceRequest) error {
+	service, ok := cfg.Services[req.ServiceKey]
+	if !ok {
+		return fmt.Errorf("unknown service_key '%s'", req.ServiceKey)
+	}
+	_ = service // service variable kept for future logging/validation
+	item, ok := cfg.Items[req.ItemKey]
+	if !ok {
+		return fmt.Errorf("unknown item_key '%s'", req.ItemKey)
+	}
+	sizeCfg, ok := item.Sizes[req.SizeKey]
+	if !ok {
+		return fmt.Errorf("unknown size_key '%s'", req.SizeKey)
+	}
+	if sizeCfg.Pricing == nil {
+		sizeCfg.Pricing = make(map[string]map[string]map[string]PriceConfig)
+	}
+	if _, ok := sizeCfg.Pricing[req.ServiceKey]; !ok {
+		sizeCfg.Pricing[req.ServiceKey] = make(map[string]map[string]PriceConfig)
+	}
+	customerPricing := sizeCfg.Pricing[req.ServiceKey]
+	if _, ok := customerPricing[req.CustomerKey]; !ok {
+		customerPricing[req.CustomerKey] = make(map[string]PriceConfig)
+	}
+	customerPricing[req.CustomerKey][req.PackageKey] = req.Price
+	sizeCfg.Pricing[req.ServiceKey] = customerPricing
+	item.Sizes[req.SizeKey] = sizeCfg
+	cfg.Items[req.ItemKey] = item
+	return nil
+}
+
+func applyPromotionUpdate(cfg *PricingConfig, req UpdatePromotionRequest) error {
+	pkg, ok := cfg.Packages[req.PackageKey]
+	if !ok {
+		return fmt.Errorf("unknown package_key '%s'", req.PackageKey)
+	}
+	quantityKey := strconv.Itoa(req.Quantity)
+	switch req.ServiceKey {
+	case "disinfection":
+		if pkg.Disinfection == nil {
+			pkg.Disinfection = make(map[string]PackagePrice)
+		}
+		pkg.Disinfection[quantityKey] = req.Price
+	case "washing":
+		if pkg.Washing == nil {
+			pkg.Washing = make(map[string]PackagePrice)
+		}
+		pkg.Washing[quantityKey] = req.Price
+	default:
+		return fmt.Errorf("service_key '%s' is not supported for promotions", req.ServiceKey)
+	}
+	cfg.Packages[req.PackageKey] = pkg
 	return nil
 }
 
@@ -173,6 +496,13 @@ func main() {
 	}
 
 	app := fiber.New()
+	app.Static("/admin-ui", "./admin-ui", fiber.Static{Index: "index.html"})
+
+	adminGroup := app.Group("/admin", adminAuthMiddleware)
+	adminGroup.Get("/config/pricing", handleGetPricingConfig)
+	adminGroup.Put("/config/pricing", handleReplacePricingConfig)
+	adminGroup.Post("/config/pricing/price", handleUpdatePriceEntry)
+	adminGroup.Post("/config/pricing/promotion", handleUpdatePromotionEntry)
 
 	app.Post("/webhook", func(c *fiber.Ctx) error {
 		var event LineEvent

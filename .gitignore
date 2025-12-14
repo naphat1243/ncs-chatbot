@@ -1,3 +1,5 @@
 ﻿*.exe
 .DS_Store
 line-webhook/__debug_*
+.env
+.vscode/launch.json
