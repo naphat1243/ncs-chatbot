@@ -24,7 +24,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 )
 
-//go:embed admin-ui/*
+//go:embed admin-ui
 var adminUI embed.FS
 
 // PricingConfig represents the JSON pricing configuration structure
