@@ -508,9 +508,16 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to load admin UI:", err)
 	}
-	app.Use("/admin-ui", filesystem.New(filesystem.Config{
-		Root:  http.FS(adminUIFS),
-		Index: "index.html",
+
+	app.Get("/admin-ui", func(c *fiber.Ctx) error {
+		return c.Redirect("/admin-ui/")
+	})
+
+	app.Use("/admin-ui/", filesystem.New(filesystem.Config{
+		Root:   http.FS(adminUIFS),
+		Index:  "index.html",
+		Browse: false,
+		MaxAge: 3600,
 	}))
 
 	adminGroup := app.Group("/admin", adminAuthMiddleware)
