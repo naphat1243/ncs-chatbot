@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -21,7 +20,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/filesystem"
 )
 
 //go:embed admin-ui
@@ -503,22 +501,37 @@ func main() {
 
 	app := fiber.New()
 
-	// Serve embedded admin UI
-	adminUIFS, err := fs.Sub(adminUI, "admin-ui")
-	if err != nil {
-		log.Fatal("Failed to load admin UI:", err)
-	}
+	// Serve embedded admin UI files
+	app.Get("/admin-ui/", func(c *fiber.Ctx) error {
+		data, err := adminUI.ReadFile("admin-ui/index.html")
+		if err != nil {
+			return c.Status(404).SendString("Not Found")
+		}
+		c.Set("Content-Type", "text/html; charset=utf-8")
+		return c.Send(data)
+	})
+
+	app.Get("/admin-ui/app.js", func(c *fiber.Ctx) error {
+		data, err := adminUI.ReadFile("admin-ui/app.js")
+		if err != nil {
+			return c.Status(404).SendString("Not Found")
+		}
+		c.Set("Content-Type", "application/javascript; charset=utf-8")
+		return c.Send(data)
+	})
+
+	app.Get("/admin-ui/styles.css", func(c *fiber.Ctx) error {
+		data, err := adminUI.ReadFile("admin-ui/styles.css")
+		if err != nil {
+			return c.Status(404).SendString("Not Found")
+		}
+		c.Set("Content-Type", "text/css; charset=utf-8")
+		return c.Send(data)
+	})
 
 	app.Get("/admin-ui", func(c *fiber.Ctx) error {
 		return c.Redirect("/admin-ui/")
 	})
-
-	app.Use("/admin-ui/", filesystem.New(filesystem.Config{
-		Root:   http.FS(adminUIFS),
-		Index:  "index.html",
-		Browse: false,
-		MaxAge: 3600,
-	}))
 
 	adminGroup := app.Group("/admin", adminAuthMiddleware)
 	adminGroup.Get("/config/pricing", handleGetPricingConfig)
