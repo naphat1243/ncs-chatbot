@@ -689,10 +689,34 @@ tabBtns.forEach((btn) => {
 });
 
 // ===== CONVERSATIONS =====
+// Track which users have already triggered an alert (reset when resolved)
+const alertedHumanUsers = new Set();
+
+// Generate an alert beep using Web Audio API (no audio file needed)
+function playAlertBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    let t = ctx.currentTime;
+    [880, 1100, 880].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "square";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.25, t + i * 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.15 + 0.13);
+      osc.start(t + i * 0.15);
+      osc.stop(t + i * 0.15 + 0.13);
+    });
+  } catch (_) { /* audio not available */ }
+}
+
 const convState = {
   conversations: [],
   selectedUserId: null,
   pollTimer: null,
+  forceScrollBottom: false, // set true when admin opens a conversation
 };
 
 const convEls = {
@@ -722,6 +746,29 @@ const refreshConversations = async () => {
     if (convState.selectedUserId) {
       refreshConvThread(convState.selectedUserId);
     }
+
+    // --- Alert: detect new customers wanting a human agent ---
+    const pendingHuman = data.filter((c) => c.wants_human && !c.takeover);
+    const newAlerts = pendingHuman.filter((c) => !alertedHumanUsers.has(c.user_id));
+    if (newAlerts.length > 0) {
+      newAlerts.forEach((c) => alertedHumanUsers.add(c.user_id));
+      playAlertBeep();
+      const notifBody = newAlerts.length === 1
+        ? `ลูกค้า ...${newAlerts[0].user_id.slice(-8)} ต้องการคุยกับเจ้าหน้าที่`
+        : `ลูกค้า ${newAlerts.length} รายต้องการคุยกับเจ้าหน้าที่`;
+      if (Notification.permission === "granted") {
+        new Notification("🆘 NCS Admin", { body: notifBody, icon: "" });
+      } else if (Notification.permission !== "denied") {
+        Notification.requestPermission().then((perm) => {
+          if (perm === "granted") new Notification("🆘 NCS Admin", { body: notifBody });
+        });
+      }
+    }
+    // Remove resolved users from the alerted set so they can re-alert if needed
+    data.filter((c) => !c.wants_human || c.takeover).forEach((c) => alertedHumanUsers.delete(c.user_id));
+    // Update page title with pending count
+    const pendingCount = pendingHuman.length;
+    document.title = pendingCount > 0 ? `(🔴 ${pendingCount}) NCS Admin` : "NCS Admin";
   } catch (err) {
     // silently ignore polling errors
   }
@@ -738,6 +785,7 @@ function renderConvList() {
     .map((c) => {
       const isActive = c.user_id === convState.selectedUserId;
       const shortId = c.user_id ? c.user_id.slice(-8) : "?";
+      const displayName = c.nickname || c.display_name || `…${shortId}`;
       const alertBadge = c.wants_human ? '<span class="alert-badge">🆘 ขอคุย</span>' : "";
       const takeoverBadge = c.takeover
         ? '<span class="mode-badge human">👤 Admin</span>'
@@ -749,7 +797,7 @@ function renderConvList() {
       const lastSeen = c.last_seen ? `<small>${c.last_seen.replace("T", " ")}</small>` : "";
       return `<div class="conv-item${isActive ? " active" : ""}" data-uid="${escapeAttr(c.user_id)}">
         <div class="conv-item-top">
-          <span class="conv-uid">…${shortId}</span>
+          <span class="conv-uid">${escapeHtml(displayName)}</span>
           ${alertBadge}${takeoverBadge}
         </div>
         <div class="conv-item-preview">${lastMsg}</div>
@@ -765,6 +813,7 @@ function renderConvList() {
 
 async function selectConversation(userId) {
   convState.selectedUserId = userId;
+  convState.forceScrollBottom = true; // always scroll to bottom when opening a conversation
   renderConvList(); // re-render to update active
   await refreshConvThread(userId);
 }
@@ -783,7 +832,15 @@ function renderConvThread(conv) {
 
   // Header
   if (convEls.threadHeader) convEls.threadHeader.style.display = "";
-  if (convEls.threadUserId) convEls.threadUserId.textContent = `ลูกค้า: ${conv.user_id}`;
+  if (convEls.threadUserId) {
+    const displayName = conv.nickname || conv.display_name || `…${conv.user_id ? conv.user_id.slice(-8) : "?"}`;
+    const shortId = conv.user_id ? conv.user_id.slice(-8) : "?";
+    const lineNameHint = conv.display_name && !conv.nickname
+      ? ` <small style="opacity:.6">(LINE: ${escapeHtml(conv.display_name)})</small>` : "";
+    convEls.threadUserId.innerHTML =
+      `<strong>${escapeHtml(displayName)}</strong>${lineNameHint}
+       <button class="btn-edit-nickname" title="ตั้งชื่อเล่น" onclick="openNicknameEditor('${escapeAttr(conv.user_id)}','${escapeAttr(conv.nickname || '')}')">✏️</button>`;
+  }
 
   const badge = convEls.statusBadge;
   if (badge) {
@@ -831,8 +888,14 @@ function renderConvThread(conv) {
       </div>`;
     })
     .join("");
-  // Scroll to bottom
-  convEls.messages.scrollTop = convEls.messages.scrollHeight;
+  // Scroll to bottom only when admin just opened this conversation OR is already near the bottom.
+  // This prevents the 8-second poll from jumping admin back to the bottom while reading old messages.
+  const msgEl = convEls.messages;
+  const isNearBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 120;
+  if (convState.forceScrollBottom || isNearBottom) {
+    msgEl.scrollTop = msgEl.scrollHeight;
+  }
+  convState.forceScrollBottom = false;
 }
 
 convEls.btnTakeover?.addEventListener("click", async () => {
@@ -889,6 +952,22 @@ convEls.replyInput?.addEventListener("keydown", (e) => {
 });
 
 convEls.refreshBtn?.addEventListener("click", refreshConversations);
+
+// ===== NICKNAME EDITOR =====
+window.openNicknameEditor = function (userId, currentNickname) {
+  const input = prompt("ตั้งชื่อเล่นลูกค้า (เว้นว่างเพื่อลบ):", currentNickname);
+  if (input === null) return; // cancelled
+  adminFetch(`/admin/conversations/${encodeURIComponent(userId)}/nickname`, {
+    method: "POST",
+    body: JSON.stringify({ nickname: input.trim() }),
+  })
+    .then(() => {
+      showToast(input.trim() ? `ตั้งชื่อ "${input.trim()}" แล้ว ✅` : "ลบชื่อเล่นแล้ว");
+      refreshConversations();
+      if (convState.selectedUserId === userId) refreshConvThread(userId);
+    })
+    .catch((err) => showToast(err.message, "error"));
+};
 
 // Auto-poll conversations every 8 seconds while on conversations tab
 setInterval(() => {

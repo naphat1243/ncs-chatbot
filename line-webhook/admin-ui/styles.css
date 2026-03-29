@@ -898,6 +898,17 @@ details summary {
     font-weight: 600;
 }
 
+.btn-edit-nickname {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 5px;
+    opacity: 0.6;
+    transition: opacity .2s;
+}
+.btn-edit-nickname:hover { opacity: 1; }
+
 .conv-thread-actions {
     display: flex;
     gap: 8px;

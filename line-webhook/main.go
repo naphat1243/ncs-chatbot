@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -85,11 +84,13 @@ type ConversationMessage struct {
 
 // UserConversation tracks the full state for a LINE user conversation
 type UserConversation struct {
-	UserID     string                `json:"user_id"`
-	Messages   []ConversationMessage `json:"messages"`
-	Takeover   bool                  `json:"takeover"`    // human agent took over
-	WantsHuman bool                  `json:"wants_human"` // customer requested a human
-	LastSeen   string                `json:"last_seen"`
+	UserID      string                `json:"user_id"`
+	DisplayName string                `json:"display_name"` // fetched from LINE profile API
+	Nickname    string                `json:"nickname"`     // set by admin
+	Messages    []ConversationMessage `json:"messages"`
+	Takeover    bool                  `json:"takeover"`    // human agent took over
+	WantsHuman  bool                  `json:"wants_human"` // customer requested a human
+	LastSeen    string                `json:"last_seen"`
 }
 
 func (c *UserConversation) appendMessage(role, text string) {
@@ -105,6 +106,71 @@ func (c *UserConversation) appendMessage(role, text string) {
 }
 
 const pricingConfigFile = "pricing_config.json"
+const conversationsFile = "conversations.json"
+
+// saveConversations persists userConversations to disk so history survives re-deploys.
+func saveConversations() {
+	userThreadLock.Lock()
+	data, err := json.Marshal(userConversations)
+	userThreadLock.Unlock()
+	if err != nil {
+		log.Printf("Failed to marshal conversations: %v", err)
+		return
+	}
+	if err := os.WriteFile(conversationsFile, data, 0644); err != nil {
+		log.Printf("Failed to save conversations: %v", err)
+	}
+}
+
+// loadConversationsFromFile restores persisted conversations on startup.
+func loadConversationsFromFile() {
+	data, err := os.ReadFile(conversationsFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("Failed to read conversations file: %v", err)
+		}
+		return
+	}
+	userThreadLock.Lock()
+	defer userThreadLock.Unlock()
+	if err := json.Unmarshal(data, &userConversations); err != nil {
+		log.Printf("Failed to parse conversations file: %v", err)
+		return
+	}
+	log.Printf("Loaded %d conversations from file", len(userConversations))
+}
+
+// fetchAndStoreLineDisplayName calls the LINE Profile API and stores the result.
+// Run as a goroutine; safe to ignore errors.
+func fetchAndStoreLineDisplayName(userId string) {
+	lineToken := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
+	if lineToken == "" {
+		return
+	}
+	req, err := http.NewRequest("GET", "https://api.line.me/v2/bot/profile/"+userId, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+lineToken)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return
+	}
+	defer resp.Body.Close()
+	var profile struct {
+		DisplayName string `json:"displayName"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil || profile.DisplayName == "" {
+		return
+	}
+	userThreadLock.Lock()
+	if conv, ok := userConversations[userId]; ok && conv.DisplayName == "" {
+		conv.DisplayName = profile.DisplayName
+	}
+	userThreadLock.Unlock()
+	go saveConversations()
+}
 
 var pricingConfig *PricingConfig
 
@@ -508,8 +574,18 @@ type LineEvent struct {
 	} `json:"events"`
 }
 
+// ToolDefinition is the Responses API flat function tool format
+type ToolDefinition struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
 var (
-	userThreadMap  = make(map[string]string)
+	systemInstructions string
+	toolDefinitions    []ToolDefinition
+
 	userThreadLock sync.Mutex
 
 	userLastQAMap = make(map[string]struct {
@@ -528,6 +604,15 @@ func main() {
 	if err := loadPricingConfig(); err != nil {
 		log.Fatal("Failed to load pricing configuration:", err)
 	}
+	// Load AI system instructions and tool definitions for Responses API
+	if err := loadSystemInstructions(); err != nil {
+		log.Fatalf("Failed to load system instructions: %v", err)
+	}
+	if err := loadToolDefinitions(); err != nil {
+		log.Fatalf("Failed to load tool definitions: %v", err)
+	}
+	// Restore conversation history from previous run
+	loadConversationsFromFile()
 
 	app := fiber.New()
 
@@ -574,6 +659,7 @@ func main() {
 	adminGroup.Post("/conversations/:userId/takeover", handleTakeoverConversation)
 	adminGroup.Post("/conversations/:userId/release", handleReleaseConversation)
 	adminGroup.Post("/conversations/:userId/reply", handleAdminReply)
+	adminGroup.Post("/conversations/:userId/nickname", handleSetNickname)
 
 	app.Post("/webhook", func(c *fiber.Ctx) error {
 		var event LineEvent
@@ -608,8 +694,10 @@ func main() {
 				userMsgBuffer[userId] = append(userMsgBuffer[userId], messageContent)
 
 				// Record customer message in conversation history
+				isNewUser := false
 				if _, ok := userConversations[userId]; !ok {
 					userConversations[userId] = &UserConversation{UserID: userId}
+					isNewUser = true
 				}
 				{
 					conv := userConversations[userId]
@@ -624,6 +712,10 @@ func main() {
 					conv.appendMessage("customer", displayMsg)
 				}
 
+				if isNewUser {
+					go fetchAndStoreLineDisplayName(userId)
+				}
+				go saveConversations()
 				// Stop existing timer if any
 				if timer, ok := userMsgTimer[userId]; ok {
 					timer.Stop()
@@ -673,6 +765,7 @@ func main() {
 							conv.appendMessage("ai", responseText)
 						}
 						userThreadLock.Unlock()
+						go saveConversations()
 					}
 				})
 
@@ -767,44 +860,6 @@ func getLineImageURL(messageID string) (string, error) {
 	return dataURL, nil
 }
 
-// parseDataURL decodes a data URL (e.g., data:image/jpeg;base64,...) into content type and raw bytes
-func parseDataURL(dataURL string) (string, []byte, error) {
-	if !strings.HasPrefix(dataURL, "data:") {
-		return "", nil, fmt.Errorf("not a data URL")
-	}
-	// Split metadata and payload
-	parts := strings.SplitN(dataURL, ",", 2)
-	if len(parts) != 2 {
-		return "", nil, fmt.Errorf("invalid data URL format")
-	}
-	meta := parts[0] // e.g., data:image/jpeg;base64
-	payload := parts[1]
-	if !strings.Contains(meta, ";base64") {
-		return "", nil, fmt.Errorf("only base64 data URLs are supported")
-	}
-	// Extract content type
-	meta = strings.TrimPrefix(meta, "data:")
-	ct := meta
-	if semi := strings.Index(ct, ";"); semi != -1 {
-		ct = ct[:semi]
-	}
-	// Sanitize payload: keep only valid base64 chars (A-Za-z0-9+/=)
-	if idx := strings.IndexByte(payload, ' '); idx != -1 {
-		payload = payload[:idx]
-	}
-	b64re := regexp.MustCompile(`[A-Za-z0-9+/=]+`)
-	match := b64re.FindString(payload)
-	if match == "" {
-		return "", nil, fmt.Errorf("no valid base64 payload found")
-	}
-	// Decode
-	decoded, err := base64.StdEncoding.DecodeString(match)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to decode base64: %w", err)
-	}
-	return ct, decoded, nil
-}
-
 // extractFirstDataURL finds the first valid image data URL in a string and returns it exactly
 func extractFirstDataURL(s string) (string, error) {
 	// Match data:image/<type>;base64,<payload>
@@ -817,54 +872,163 @@ func extractFirstDataURL(s string) (string, error) {
 	return s[loc[0]:loc[1]], nil
 }
 
-// uploadImageFileToOpenAI uploads image bytes to OpenAI Files API and returns file_id for Assistants
-func uploadImageFileToOpenAI(client *http.Client, apiKey string, filename string, data []byte) (string, error) {
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	// purpose must be "assistants" for Assistants API
-	if err := writer.WriteField("purpose", "assistants"); err != nil {
-		return "", fmt.Errorf("failed to write purpose: %w", err)
-	}
-	fw, err := writer.CreateFormFile("file", filename)
+// loadSystemInstructions reads gpt_instructions.md into the systemInstructions global.
+func loadSystemInstructions() error {
+	data, err := os.ReadFile("gpt_instructions.md")
 	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %w", err)
+		return fmt.Errorf("failed to read gpt_instructions.md: %v", err)
 	}
-	if _, err := fw.Write(data); err != nil {
-		return "", fmt.Errorf("failed to write file data: %w", err)
+	systemInstructions = string(data)
+	log.Printf("System instructions loaded (%d bytes)", len(systemInstructions))
+	return nil
+}
+
+// loadToolDefinitions reads gpt_functions.json (Assistants API format) and converts to Responses API format.
+func loadToolDefinitions() error {
+	data, err := os.ReadFile("gpt_functions.json")
+	if err != nil {
+		return fmt.Errorf("failed to read gpt_functions.json: %v", err)
 	}
-	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("failed to close multipart writer: %w", err)
+	// Assistants API format: [{"type":"function","function":{"name":...,"description":...,"parameters":...}}]
+	// Responses API format (flat): [{"type":"function","name":...,"description":...,"parameters":...}]
+	var src []struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(data, &src); err != nil {
+		return fmt.Errorf("failed to parse gpt_functions.json: %v", err)
+	}
+	toolDefinitions = make([]ToolDefinition, 0, len(src))
+	for _, item := range src {
+		toolDefinitions = append(toolDefinitions, ToolDefinition{
+			Type:        "function",
+			Name:        item.Function.Name,
+			Description: item.Function.Description,
+			Parameters:  item.Function.Parameters,
+		})
+	}
+	log.Printf("Loaded %d tool definitions", len(toolDefinitions))
+	return nil
+}
+
+// flagSchedulingFallback marks the user as wanting human help when the scheduling API fails.
+func flagSchedulingFallback(userId string) string {
+	userThreadLock.Lock()
+	if conv, ok := userConversations[userId]; ok {
+		conv.WantsHuman = true
+	}
+	userThreadLock.Unlock()
+	go saveConversations()
+	return "ระบบตารางนัดหมายขัดข้องชั่วคราว กรุณาขอชื่อและเบอร์โทรของลูกค้า แล้วแจ้งว่าเจ้าหน้าที่จะติดต่อกลับเพื่อนัดหมายโดยตรง"
+}
+
+// dispatchFunctionCall executes the named function with the given JSON arguments.
+func dispatchFunctionCall(name string, arguments json.RawMessage, userId string) string {
+	log.Printf("Dispatching function call: %s args: %s", name, string(arguments))
+
+	// unmarshalArgs tries direct then double-unmarshal (some models wrap args as a JSON string)
+	unmarshalArgs := func(dest interface{}) error {
+		if err := json.Unmarshal(arguments, dest); err == nil {
+			return nil
+		}
+		var s string
+		if err := json.Unmarshal(arguments, &s); err != nil {
+			return err
+		}
+		return json.Unmarshal([]byte(s), dest)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/files", &buf)
-	if err != nil {
-		return "", fmt.Errorf("failed to create upload request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	switch name {
+	case "get_available_slots_with_months":
+		var args struct {
+			ThaiMonthYear string `json:"thai_month_year"`
+		}
+		if err := unmarshalArgs(&args); err != nil || args.ThaiMonthYear == "" {
+			return "ไม่พบเดือนที่ระบุ"
+		}
+		gsUrl := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + url.QueryEscape(args.ThaiMonthYear)
+		resp, err := http.Get(gsUrl)
+		if err != nil {
+			log.Printf("Error calling scheduling API: %v", err)
+			return flagSchedulingFallback(userId)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return string(body)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to upload file: %w", err)
+	case "get_ncs_pricing":
+		var args struct {
+			ServiceType  string `json:"service_type"`
+			ItemType     string `json:"item_type"`
+			Size         string `json:"size,omitempty"`
+			CustomerType string `json:"customer_type,omitempty"`
+			PackageType  string `json:"package_type,omitempty"`
+			Quantity     int    `json:"quantity,omitempty"`
+		}
+		if err := unmarshalArgs(&args); err != nil {
+			return "Error parsing pricing arguments: " + err.Error()
+		}
+		if args.CustomerType == "" {
+			args.CustomerType = "new"
+		}
+		if args.PackageType == "" {
+			args.PackageType = "regular"
+		}
+		if args.Quantity == 0 {
+			args.Quantity = 1
+		}
+		return getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
+
+	case "get_action_step_summary":
+		var args struct {
+			AnalysisType       string `json:"analysis_type"`
+			ItemIdentified     string `json:"item_identified"`
+			ConditionAssessed  string `json:"condition_assessed,omitempty"`
+			RecommendedService string `json:"recommended_service,omitempty"`
+		}
+		if err := unmarshalArgs(&args); err != nil {
+			return "Error parsing step summary arguments: " + err.Error()
+		}
+		return getActionStepSummary(args.AnalysisType, args.ItemIdentified, args.ConditionAssessed, args.RecommendedService)
+
+	case "get_image_analysis_guidance":
+		var args struct {
+			ImageType       string `json:"image_type,omitempty"`
+			AnalysisRequest string `json:"analysis_request,omitempty"`
+		}
+		_ = unmarshalArgs(&args)
+		return getImageAnalysisGuidance(args.ImageType, args.AnalysisRequest)
+
+	case "get_workflow_step_instruction":
+		var args struct {
+			CurrentStep     int    `json:"current_step"`
+			UserMessage     string `json:"user_message,omitempty"`
+			ImageAnalysis   string `json:"image_analysis,omitempty"`
+			PreviousContext string `json:"previous_context,omitempty"`
+		}
+		if err := unmarshalArgs(&args); err != nil {
+			return "Error parsing workflow step arguments: " + err.Error()
+		}
+		return getWorkflowStepInstruction(args.CurrentStep, args.UserMessage, args.ImageAnalysis, args.PreviousContext)
+
+	case "get_current_workflow_step":
+		var args struct {
+			UserMessage     string `json:"user_message"`
+			ImageAnalysis   string `json:"image_analysis,omitempty"`
+			PreviousContext string `json:"previous_context,omitempty"`
+		}
+		if err := unmarshalArgs(&args); err != nil {
+			return "Error parsing current step arguments: " + err.Error()
+		}
+		step := getCurrentWorkflowStep(args.UserMessage, args.ImageAnalysis, args.PreviousContext)
+		return fmt.Sprintf("Current workflow step: %d", step)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		log.Printf("❌ File upload failed. Status=%d Body=%s", resp.StatusCode, string(body))
-		return "", fmt.Errorf("file upload failed: %s", resp.Status)
-	}
-	var obj struct {
-		ID       string `json:"id"`
-		Object   string `json:"object"`
-		Filename string `json:"filename"`
-	}
-	_ = json.Unmarshal(body, &obj)
-	if obj.ID == "" {
-		return "", fmt.Errorf("file_id missing in upload response")
-	}
-	log.Printf("✅ Uploaded image to OpenAI. file_id=%s filename=%s", obj.ID, obj.Filename)
-	return obj.ID, nil
+
+	return "Unknown function: " + name
 }
 
 // isErrorResponse checks if a response is an error message that shouldn't be cached
@@ -897,755 +1061,210 @@ func isErrorResponse(response string) bool {
 	}
 
 	return false
-} // getAssistantResponse uses OpenAI Assistants API, mapping userId to threadId in-memory
+} // getAssistantResponse calls the OpenAI Responses API (stateless) with the full conversation history.
+// It handles tool/function calls in a synchronous loop and returns the final assistant text.
 func getAssistantResponse(userId, message string) string {
-	log.Printf("getAssistantResponse called for user %s with message: %s", userId, message)
+	log.Printf("getAssistantResponse called for user %s, message length: %d", userId, len(message))
 
-	// Check for duplicate question - return previous answer to save costs
+	// Return cached answer for duplicate questions to save costs
 	userThreadLock.Lock()
 	lastQA, hasLast := userLastQAMap[userId]
 	userThreadLock.Unlock()
 	if hasLast && lastQA.Question == message && lastQA.Answer != "" {
-		// Only return cached answer if it's not an error message
 		if !isErrorResponse(lastQA.Answer) {
-			log.Printf("Duplicate question detected for user %s, returning cached answer", userId)
+			log.Printf("Returning cached answer for user %s", userId)
 			return lastQA.Answer
-		} else {
-			log.Printf("Cached response is an error, will generate new response for user %s", userId)
 		}
 	}
 
 	apiKey := os.Getenv("CHATGPT_API_KEY")
 	if apiKey == "" {
-		log.Printf("OpenAI API key not configured for user %s", userId)
 		return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้งหรือติดต่อเจ้าหน้าที่"
 	}
-	client := &http.Client{}
 
+	// Build input items from stored conversation history (all messages except the current one)
+	var inputItems []interface{}
 	userThreadLock.Lock()
-	threadId, ok := userThreadMap[userId]
+	conv := userConversations[userId]
+	var historyMsgs []ConversationMessage
+	if conv != nil && len(conv.Messages) > 1 {
+		historyMsgs = make([]ConversationMessage, len(conv.Messages)-1)
+		copy(historyMsgs, conv.Messages[:len(conv.Messages)-1])
+	}
 	userThreadLock.Unlock()
 
-	if !ok {
-		// Create new thread
-		threadReq := map[string]interface{}{}
-		threadPayload, _ := json.Marshal(threadReq)
-		req, _ := http.NewRequest("POST", "https://api.openai.com/v1/threads", bytes.NewReader(threadPayload))
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("OpenAI-Beta", "assistants=v2")
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Error creating thread for user %s: %v", userId, err)
-			return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง"
+	// Cap history at last 50 messages to control context window size
+	if len(historyMsgs) > 50 {
+		historyMsgs = historyMsgs[len(historyMsgs)-50:]
+	}
+	for _, msg := range historyMsgs {
+		switch msg.Role {
+		case "customer":
+			inputItems = append(inputItems, map[string]interface{}{
+				"role":    "user",
+				"content": msg.Text,
+			})
+		case "ai":
+			inputItems = append(inputItems, map[string]interface{}{
+				"role":    "assistant",
+				"content": msg.Text,
+			})
+			// "admin" messages are skipped — they are not part of the AI conversation
 		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		var threadResp struct {
-			ID string `json:"id"`
-		}
-		json.Unmarshal(body, &threadResp)
-		threadId = threadResp.ID
-		if threadId == "" {
-			log.Printf("Failed to create thread. Status: %v, Body: %s", resp.Status, string(body))
-			return "Failed to create thread."
-		}
-		userThreadLock.Lock()
-		userThreadMap[userId] = threadId
-		userThreadLock.Unlock()
 	}
 
-	// Get current time in Asia/Bangkok (local calculation – no external API dependency)
-	var timeStr = getBangkokTime()
-
-	// Add message to thread (with current time for GPT)
-	var msgReq map[string]interface{}
-
-	// Check if message contains image URL - more robust detection
+	// Add current user message, with inline image if present
+	timeStr := getBangkokTime()
 	if strings.Contains(message, "ลูกค้าส่งรูปภาพ:") && strings.Contains(message, "data:image") {
-		// Handle image message with vision
-		log.Printf("🖼️ DETECTED IMAGE MESSAGE: preparing vision request")
-
-		// Extract the exact data URL safely (avoid trailing characters)
 		imageURL, err := extractFirstDataURL(message)
-		if err != nil {
-			log.Printf("❌ ERROR: %v", err)
-			return "ขออภัย ไม่สามารถประมวลผลรูปภาพได้ กรุณาลองใหม่อีกครั้ง"
-		}
-		log.Printf("🔍 Image URL extracted - Length: %d characters", len(imageURL))
-
-		// Check if image data URL is too large for OpenAI API
-		const maxDataURLLength = 1000000 // ~1MB base64 encoded
-		if len(imageURL) > maxDataURLLength {
-			log.Printf("⚠️ Data URL too long (%d chars > %d chars) - rejecting", len(imageURL), maxDataURLLength)
-			return "ขออภัย รูปภาพมีขนาดใหญ่เกินไป กรุณาลดขนาดรูปภาพหรือถ่ายรูปใหม่ให้เล็กกว่านี้แล้วลองใหม่อีกครั้งค่ะ 📸"
-		}
-
-		// Validate data URL format
-		if !strings.HasPrefix(imageURL, "data:image/") {
-			log.Printf("❌ ERROR: Invalid data URL format: %s", imageURL[:50])
-			return "ขออภัย รูปแบบรูปภาพไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง"
-		} // Show preview of image URL (first 100 chars or less)
-		previewLen := 100
-		if len(imageURL) < previewLen {
-			previewLen = len(imageURL)
-		}
-		log.Printf("🎯 Image URL preview: %s...", imageURL[:previewLen])
-
-		// Convert data URL to bytes and upload via Files API
-		ct, imgBytes, err := parseDataURL(imageURL)
-		if err != nil {
-			log.Printf("❌ Failed to parse data URL: %v", err)
-			return "ขออภัย ไม่สามารถอ่านรูปภาพได้ กรุณาลองใหม่อีกครั้ง"
-		}
-		// Derive filename extension from content type
-		filename := "customer-image"
-		if strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
-			filename += ".jpg"
-		}
-		if strings.Contains(ct, "png") {
-			filename += ".png"
-		}
-		if strings.Contains(ct, "webp") {
-			filename += ".webp"
-		}
-
-		fileID, err := uploadImageFileToOpenAI(client, apiKey, filename, imgBytes)
-		if err != nil {
-			log.Printf("❌ Failed to upload image to OpenAI: %v", err)
-			return "ขออภัย ระบบอัปโหลดรูปภาพมีปัญหา กรุณาลองใหม่อีกครั้งค่ะ"
-		}
-
-		msgReq = map[string]interface{}{
-			"role": "user",
-			"content": []map[string]interface{}{
-				{
-					"type": "text",
-					"text": fmt.Sprintf("ขณะนี้เวลา %s: ลูกค้าส่งรูปภาพมา กรุณาวิเคราะห์รูปภาพและให้คำแนะนำเกี่ยวกับบริการทำความสะอาดที่เหมาะสม", timeStr),
-				},
-				{
-					"type": "image_file",
-					"image_file": map[string]string{
-						"file_id": fileID,
+		if err == nil {
+			inputItems = append(inputItems, map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type": "input_text",
+						"text": fmt.Sprintf("ขณะนี้เวลา %s: ลูกค้าส่งรูปภาพมา กรุณาวิเคราะห์รูปภาพและให้คำแนะนำเกี่ยวกับบริการทำความสะอาดที่เหมาะสม", timeStr),
+					},
+					map[string]interface{}{
+						"type":      "input_image",
+						"image_url": imageURL,
 					},
 				},
-			},
+			})
+		} else {
+			log.Printf("Failed to extract image URL: %v", err)
+			inputItems = append(inputItems, map[string]interface{}{
+				"role":    "user",
+				"content": fmt.Sprintf("ขณะนี้เวลา %s: ลูกค้าส่งรูปภาพมา (ไม่สามารถแสดงได้)", timeStr),
+			})
 		}
-		log.Printf("✅ VISION REQUEST PREPARED (image_file). file_id=%s", fileID)
 	} else {
-		// Handle text message
-		msgReq = map[string]interface{}{
+		inputItems = append(inputItems, map[string]interface{}{
 			"role":    "user",
 			"content": fmt.Sprintf("ขณะนี้เวลา %s: %s", timeStr, message),
+		})
+	}
+
+	client := &http.Client{Timeout: 120 * time.Second}
+
+	// Loop to handle function/tool calls (Responses API is synchronous — no polling needed)
+	for iteration := 0; iteration < 10; iteration++ {
+		payload := map[string]interface{}{
+			"model":        "gpt-4o",
+			"instructions": systemInstructions,
+			"input":        inputItems,
+			"tools":        toolDefinitions,
+			"store":        false,
 		}
-	}
+		payloadBytes, _ := json.Marshal(payload)
+		log.Printf("Responses API request (iteration %d), payload size: %d bytes", iteration, len(payloadBytes))
 
-	msgPayload, _ := json.Marshal(msgReq)
-	log.Printf("📤 Sending message to OpenAI thread. Payload size: %d bytes", len(msgPayload))
-	if strings.Contains(string(msgPayload), "image_url") {
-		log.Printf("🖼️ CONFIRMED: Message contains image_url for vision processing")
-	}
-
-	msgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
-	msgReqHttp, _ := http.NewRequest("POST", msgUrl, bytes.NewReader(msgPayload))
-	msgReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
-	msgReqHttp.Header.Set("Content-Type", "application/json")
-	msgReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
-	msgResp, err := client.Do(msgReqHttp)
-	if err != nil {
-		log.Printf("❌ ERROR sending message to thread: %v", err)
-		return "Error sending message to thread."
-	}
-	defer msgResp.Body.Close()
-	body, _ := io.ReadAll(msgResp.Body)
-	log.Printf("📬 Message sent to thread. Response status: %d", msgResp.StatusCode)
-	if msgResp.StatusCode != 200 {
-		log.Printf("⚠️ Non-200 response body: %s", string(body))
-	}
-	var msgRespObj map[string]interface{}
-	json.Unmarshal(body, &msgRespObj)
-
-	// Run the assistant
-	assistantId := os.Getenv("OPENAI_ASSISTANT_ID")
-	if assistantId == "" {
-		log.Printf("OPENAI_ASSISTANT_ID not set")
-		return "OPENAI_ASSISTANT_ID not set."
-	}
-
-	log.Printf("Running assistant %s on thread %s", assistantId, threadId)
-
-	// Check for active runs first and cancel them if needed
-	listRunsUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs"
-	listRunsReq, _ := http.NewRequest("GET", listRunsUrl, nil)
-	listRunsReq.Header.Set("Authorization", "Bearer "+apiKey)
-	listRunsReq.Header.Set("OpenAI-Beta", "assistants=v2")
-	listRunsResp, err := client.Do(listRunsReq)
-	if err == nil {
-		defer listRunsResp.Body.Close()
-		listRunsBody, _ := io.ReadAll(listRunsResp.Body)
-		var listRunsObj struct {
-			Data []struct {
-				ID     string `json:"id"`
-				Status string `json:"status"`
-			} `json:"data"`
-		}
-		json.Unmarshal(listRunsBody, &listRunsObj)
-
-		// Cancel any active runs
-		for _, run := range listRunsObj.Data {
-			if run.Status == "in_progress" || run.Status == "requires_action" {
-				log.Printf("Found active run %s with status %s, cancelling it", run.ID, run.Status)
-				cancelUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + run.ID + "/cancel"
-				cancelReq, _ := http.NewRequest("POST", cancelUrl, nil)
-				cancelReq.Header.Set("Authorization", "Bearer "+apiKey)
-				cancelReq.Header.Set("OpenAI-Beta", "assistants=v2")
-				cancelResp, err := client.Do(cancelReq)
-				if err == nil {
-					defer cancelResp.Body.Close()
-					log.Printf("Cancelled run %s", run.ID)
-				} else {
-					log.Printf("Failed to cancel run %s: %v", run.ID, err)
-				}
-			}
-		}
-	}
-
-	runReq := map[string]interface{}{
-		"assistant_id": assistantId,
-	}
-	runPayload, _ := json.Marshal(runReq)
-	runUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs"
-	runReqHttp, _ := http.NewRequest("POST", runUrl, bytes.NewReader(runPayload))
-	runReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
-	runReqHttp.Header.Set("Content-Type", "application/json")
-	runReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
-	runResp, err := client.Do(runReqHttp)
-	if err != nil {
-		log.Printf("Error running assistant: %v", err)
-		return "Error running assistant."
-	}
-	defer runResp.Body.Close()
-	body, _ = io.ReadAll(runResp.Body)
-
-	log.Printf("Assistant run response: %s", string(body))
-
-	var runRespObj struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-		Error  struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"error"`
-	}
-	json.Unmarshal(body, &runRespObj)
-
-	// If there's an error about active run, try to handle it
-	if runRespObj.Error.Type == "invalid_request_error" && runRespObj.ID == "" {
-		log.Printf("Run creation failed with error: %s", runRespObj.Error.Message)
-
-		// Try to extract run ID from error message and cancel it
-		if strings.Contains(runRespObj.Error.Message, "already has an active run") {
-			// Extract run ID from error message like "run_O1YyJLu1c08K603vr1kelKJb"
-			words := strings.Fields(runRespObj.Error.Message)
-			for _, word := range words {
-				if strings.HasPrefix(word, "run_") {
-					runId := strings.TrimSuffix(word, ".")
-					log.Printf("Attempting to cancel active run: %s", runId)
-
-					cancelUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runId + "/cancel"
-					cancelReq, _ := http.NewRequest("POST", cancelUrl, nil)
-					cancelReq.Header.Set("Authorization", "Bearer "+apiKey)
-					cancelReq.Header.Set("OpenAI-Beta", "assistants=v2")
-					cancelResp, err := client.Do(cancelReq)
-					if err == nil {
-						defer cancelResp.Body.Close()
-						log.Printf("Successfully cancelled run %s", runId)
-
-						// Wait a moment and try creating the run again
-						time.Sleep(2 * time.Second)
-
-						// Retry creating the run
-						runResp2, err := client.Do(runReqHttp)
-						if err == nil {
-							defer runResp2.Body.Close()
-							body2, _ := io.ReadAll(runResp2.Body)
-							log.Printf("Retry run response: %s", string(body2))
-							json.Unmarshal(body2, &runRespObj)
-						}
-					}
-					break
-				}
-			}
-		}
-	}
-
-	if runRespObj.ID == "" {
-		log.Printf("Failed to start run. Response: %s", string(body))
-		return "Failed to start run."
-	}
-
-	log.Printf("Assistant run started with ID: %s, initial status: %s", runRespObj.ID, runRespObj.Status)
-
-	// Poll run status and get response waiting 60 sec
-	var lastToolCallSignature string
-	var submittedToolOutputs bool
-	for i := 0; i < 60; i++ {
-		runStatusUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID
-		runStatusReq, _ := http.NewRequest("GET", runStatusUrl, nil)
-		runStatusReq.Header.Set("Authorization", "Bearer "+apiKey)
-		runStatusReq.Header.Set("OpenAI-Beta", "assistants=v2")
-		runStatusResp, err := client.Do(runStatusReq)
+		req, err := http.NewRequest("POST", "https://api.openai.com/v1/responses", bytes.NewReader(payloadBytes))
 		if err != nil {
-			return "Error polling run status."
+			log.Printf("Failed to create request: %v", err)
+			return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง"
 		}
-		statusBody, _ := io.ReadAll(runStatusResp.Body)
-		runStatusResp.Body.Close()
-		var statusObj struct {
-			Status         string `json:"status"`
-			RequiredAction struct {
-				Type              string `json:"type"`
-				SubmitToolOutputs struct {
-					ToolCalls []struct {
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string          `json:"name"`
-							Arguments json.RawMessage `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"submit_tool_outputs"`
-			} `json:"required_action"`
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Responses API request failed: %v", err)
+			return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง"
 		}
-		json.Unmarshal(statusBody, &statusObj)
-		log.Printf("Run status: %s", statusObj.Status)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 
-		// Add detailed logging for function calls
-		if statusObj.RequiredAction.Type == "submit_tool_outputs" {
-			log.Printf("Function calls required: %d", len(statusObj.RequiredAction.SubmitToolOutputs.ToolCalls))
+		if resp.StatusCode != 200 {
+			log.Printf("Responses API error %d: %s", resp.StatusCode, string(body))
+			return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง"
+		}
+		log.Printf("Responses API response: %s", string(body))
+
+		// Parse output items
+		var respObj struct {
+			Output []json.RawMessage `json:"output"`
+		}
+		if err := json.Unmarshal(body, &respObj); err != nil {
+			log.Printf("Failed to parse Responses API response: %v", err)
+			return "ขออภัย ระบบมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง"
 		}
 
-		// --- เช็ค required_action.submit_tool_outputs.tool_calls ใน /runs ---
-		if statusObj.RequiredAction.Type == "submit_tool_outputs" && len(statusObj.RequiredAction.SubmitToolOutputs.ToolCalls) > 0 {
-			// Build a signature of current tool call IDs to detect duplicates
-			var ids []string
-			for _, c := range statusObj.RequiredAction.SubmitToolOutputs.ToolCalls {
-				ids = append(ids, c.ID)
-			}
-			currentSignature := strings.Join(ids, ",")
-			if currentSignature == lastToolCallSignature && submittedToolOutputs {
-				// Already submitted these tool outputs; wait for assistant to process
-				log.Printf("Tool outputs already submitted for signature %s; waiting...", currentSignature)
-				time.Sleep(800 * time.Millisecond)
-				continue
-			}
-			var aggregatedOutputs []map[string]interface{}
-			for _, call := range statusObj.RequiredAction.SubmitToolOutputs.ToolCalls {
-				log.Printf("Processing function call: %s", call.Function.Name)
-
-				if call.Function.Name == "get_available_slots_with_months" {
-					log.Printf("get_available_slots_with_months called with arguments: %s", string(call.Function.Arguments))
-					var args struct {
-						ThaiMonthYear string `json:"thai_month_year"`
-					}
-					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
-						var argStr string
-						json.Unmarshal(call.Function.Arguments, &argStr)
-						json.Unmarshal([]byte(argStr), &args)
-					}
-					if args.ThaiMonthYear != "" {
-						gsUrl := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + url.QueryEscape(args.ThaiMonthYear)
-						resp, err := http.Get(gsUrl)
-						if err != nil {
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error calling Google Apps Script."})
-						} else {
-							bodySlots, _ := io.ReadAll(resp.Body)
-							resp.Body.Close()
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": string(bodySlots)})
-						}
-					} else {
-						aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "ไม่พบเดือน"})
-					}
-				} else if call.Function.Name == "get_ncs_pricing" {
-					log.Printf("get_ncs_pricing called with arguments: %s", string(call.Function.Arguments))
-					var args struct {
-						ServiceType  string `json:"service_type"`
-						ItemType     string `json:"item_type"`
-						Size         string `json:"size,omitempty"`
-						CustomerType string `json:"customer_type,omitempty"`
-						PackageType  string `json:"package_type,omitempty"`
-						Quantity     int    `json:"quantity,omitempty"`
-					}
-
-					// Try direct unmarshaling first
-					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
-						// If that fails, try double unmarshaling (string wrapped)
-						var argStr string
-						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
-							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
-								log.Printf("Failed to parse get_ncs_pricing arguments after double unmarshal: %v", err3)
-								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing pricing arguments: " + err3.Error()})
-								continue
-							}
-						} else {
-							log.Printf("Failed to parse get_ncs_pricing arguments: %v", err)
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing pricing arguments: " + err.Error()})
-							continue
-						}
-					}
-
-					// Set defaults for optional parameters according to GPT function definition
-					if args.CustomerType == "" {
-						args.CustomerType = "new" // Default to new customer
-					}
-					if args.PackageType == "" {
-						args.PackageType = "regular" // Default to regular pricing
-					}
-					if args.Quantity == 0 {
-						args.Quantity = 1 // Default quantity
-					}
-
-					log.Printf("Parsed pricing arguments: ServiceType='%s', ItemType='%s', Size='%s', CustomerType='%s', PackageType='%s', Quantity=%d",
-						args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
-
-					result := getNCSPricing(args.ServiceType, args.ItemType, args.Size, args.CustomerType, args.PackageType, args.Quantity)
-					log.Printf("Pricing function result: %s", result)
-					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
-				} else if call.Function.Name == "get_action_step_summary" {
-					log.Printf("get_action_step_summary called with arguments: %s", string(call.Function.Arguments))
-					var args struct {
-						AnalysisType       string `json:"analysis_type"`
-						ItemIdentified     string `json:"item_identified"`
-						ConditionAssessed  string `json:"condition_assessed,omitempty"`
-						RecommendedService string `json:"recommended_service,omitempty"`
-					}
-
-					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
-						var argStr string
-						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
-							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
-								log.Printf("Failed to parse get_action_step_summary arguments after double unmarshal: %v", err3)
-								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing step summary arguments: " + err3.Error()})
-								continue
-							}
-						} else {
-							log.Printf("Failed to parse get_action_step_summary arguments: %v", err)
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing step summary arguments: " + err.Error()})
-							continue
-						}
-					}
-
-					log.Printf("Parsed step summary arguments: AnalysisType='%s', ItemIdentified='%s', ConditionAssessed='%s', RecommendedService='%s'",
-						args.AnalysisType, args.ItemIdentified, args.ConditionAssessed, args.RecommendedService)
-
-					result := getActionStepSummary(args.AnalysisType, args.ItemIdentified, args.ConditionAssessed, args.RecommendedService)
-					log.Printf("Step summary result: %s", result)
-					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
-				} else if call.Function.Name == "get_image_analysis_guidance" {
-					log.Printf("get_image_analysis_guidance called with arguments: %s", string(call.Function.Arguments))
-					var args struct {
-						ImageType       string `json:"image_type,omitempty"`
-						AnalysisRequest string `json:"analysis_request,omitempty"`
-					}
-
-					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
-						var argStr string
-						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
-							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
-								log.Printf("Failed to parse get_image_analysis_guidance arguments after double unmarshal: %v", err3)
-								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing image guidance arguments: " + err3.Error()})
-								continue
-							}
-						} else {
-							log.Printf("Failed to parse get_image_analysis_guidance arguments: %v", err)
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing image guidance arguments: " + err.Error()})
-							continue
-						}
-					}
-
-					log.Printf("Parsed image guidance arguments: ImageType='%s', AnalysisRequest='%s'",
-						args.ImageType, args.AnalysisRequest)
-
-					result := getImageAnalysisGuidance(args.ImageType, args.AnalysisRequest)
-					log.Printf("Image guidance result: %s", result)
-					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
-				} else if call.Function.Name == "get_workflow_step_instruction" {
-					log.Printf("get_workflow_step_instruction called with arguments: %s", string(call.Function.Arguments))
-					var args struct {
-						CurrentStep     int    `json:"current_step"`
-						UserMessage     string `json:"user_message,omitempty"`
-						ImageAnalysis   string `json:"image_analysis,omitempty"`
-						PreviousContext string `json:"previous_context,omitempty"`
-					}
-
-					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
-						var argStr string
-						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
-							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
-								log.Printf("Failed to parse get_workflow_step_instruction arguments after double unmarshal: %v", err3)
-								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing workflow step arguments: " + err3.Error()})
-								continue
-							}
-						} else {
-							log.Printf("Failed to parse get_workflow_step_instruction arguments: %v", err)
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing workflow step arguments: " + err.Error()})
-							continue
-						}
-					}
-
-					log.Printf("Parsed workflow step arguments: CurrentStep=%d, UserMessage='%s', ImageAnalysis='%s', PreviousContext='%s'",
-						args.CurrentStep, args.UserMessage, args.ImageAnalysis, args.PreviousContext)
-
-					result := getWorkflowStepInstruction(args.CurrentStep, args.UserMessage, args.ImageAnalysis, args.PreviousContext)
-					log.Printf("Workflow step result: %s", result)
-					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
-				} else if call.Function.Name == "get_current_workflow_step" {
-					log.Printf("get_current_workflow_step called with arguments: %s", string(call.Function.Arguments))
-					var args struct {
-						UserMessage     string `json:"user_message"`
-						ImageAnalysis   string `json:"image_analysis,omitempty"`
-						PreviousContext string `json:"previous_context,omitempty"`
-					}
-
-					if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
-						var argStr string
-						if err2 := json.Unmarshal(call.Function.Arguments, &argStr); err2 == nil {
-							if err3 := json.Unmarshal([]byte(argStr), &args); err3 != nil {
-								log.Printf("Failed to parse get_current_workflow_step arguments after double unmarshal: %v", err3)
-								aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing current step arguments: " + err3.Error()})
-								continue
-							}
-						} else {
-							log.Printf("Failed to parse get_current_workflow_step arguments: %v", err)
-							aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": "Error parsing current step arguments: " + err.Error()})
-							continue
-						}
-					}
-
-					log.Printf("Parsed current step arguments: UserMessage='%s', ImageAnalysis='%s', PreviousContext='%s'",
-						args.UserMessage, args.ImageAnalysis, args.PreviousContext)
-
-					stepNumber := getCurrentWorkflowStep(args.UserMessage, args.ImageAnalysis, args.PreviousContext)
-					result := fmt.Sprintf("Current workflow step: %d", stepNumber)
-					log.Printf("Current step result: %s", result)
-					aggregatedOutputs = append(aggregatedOutputs, map[string]interface{}{"tool_call_id": call.ID, "output": result})
-				}
-			}
-			if len(aggregatedOutputs) > 0 {
-				payload, _ := json.Marshal(map[string]interface{}{"tool_outputs": aggregatedOutputs})
-				submitUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID + "/submit_tool_outputs"
-				submitReq, _ := http.NewRequest("POST", submitUrl, bytes.NewReader(payload))
-				submitReq.Header.Set("Authorization", "Bearer "+apiKey)
-				submitReq.Header.Set("Content-Type", "application/json")
-				submitReq.Header.Set("OpenAI-Beta", "assistants=v2")
-				resp, err := client.Do(submitReq)
-				if err != nil {
-					log.Printf("Error submitting aggregated tool outputs: %v", err)
-				} else {
-					bodySubmit, _ := io.ReadAll(resp.Body)
-					resp.Body.Close()
-					log.Printf("Submitted %d tool outputs. Status: %d Body: %s", len(aggregatedOutputs), resp.StatusCode, string(bodySubmit))
-				}
-				lastToolCallSignature = currentSignature
-				submittedToolOutputs = true
-				// Small delay to allow run state update
-				time.Sleep(700 * time.Millisecond)
-				continue
-			}
-		}
-		// Reset flag if run moved past requires_action
-		if statusObj.Status != "requires_action" {
-			submittedToolOutputs = false
-		}
-		if statusObj.Status == "completed" {
-			break
-		}
-	}
-
-	// Get messages (last assistant message)
-	getMsgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
-	getMsgReq, _ := http.NewRequest("GET", getMsgUrl, nil)
-	getMsgReq.Header.Set("Authorization", "Bearer "+apiKey)
-	getMsgReq.Header.Set("OpenAI-Beta", "assistants=v2")
-	getMsgResp, err := client.Do(getMsgReq)
-	if err != nil {
-		return "Error getting messages."
-	}
-	defer getMsgResp.Body.Close()
-	body, _ = io.ReadAll(getMsgResp.Body)
-	var msgList struct {
-		Data []struct {
+		type outputItem struct {
+			Type    string `json:"type"`
 			Role    string `json:"role"`
 			Content []struct {
 				Type string `json:"type"`
-				Text struct {
-					Value string `json:"value"`
-				} `json:"text"`
+				Text string `json:"text"`
 			} `json:"content"`
-		} `json:"data"`
-	}
-	json.Unmarshal(body, &msgList)
-	for i := 0; i < len(msgList.Data); i++ {
-		if msgList.Data[i].Role == "assistant" && len(msgList.Data[i].Content) > 0 {
-			if msgList.Data[i].Content[0].Type == "text" {
-				reply := msgList.Data[i].Content[0].Text.Value
-				log.Printf("Assistant text response: %s", reply)
+			ID        string          `json:"id"`
+			CallID    string          `json:"call_id"`
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
 
-				// Check if the response contains JSON pricing parameters (GPT returning JSON instead of calling function)
-				if strings.Contains(reply, "service_type") && strings.Contains(reply, "item_type") {
-					log.Printf("Detected JSON pricing parameters in text response, attempting to parse and call function")
-					// Try to extract and parse JSON from the response
-					if pricingResult := extractAndProcessPricingJSON(reply); pricingResult != "" {
-						log.Printf("Successfully processed pricing JSON: %s", pricingResult)
-						return pricingResult
-					}
-				}
+		var parsedOutput []outputItem
+		for _, raw := range respObj.Output {
+			var item outputItem
+			json.Unmarshal(raw, &item)
+			parsedOutput = append(parsedOutput, item)
+		}
 
-				if reply != "" && !isErrorResponse(reply) {
-					// Only store successful responses, not error messages
-					userThreadLock.Lock()
-					userLastQAMap[userId] = struct {
-						Question string
-						Answer   string
-					}{Question: message, Answer: reply}
-					userThreadLock.Unlock()
-					log.Printf("Cached successful response for user %s", userId)
-					fmt.Println(reply)
-					return reply
-				} else if reply != "" {
-					// Return error response but don't cache it
-					log.Printf("Not caching error response for user %s", userId)
-					fmt.Println(reply)
-					return reply
-				}
+		// Collect function calls
+		var toolCalls []outputItem
+		for _, item := range parsedOutput {
+			if item.Type == "function_call" {
+				toolCalls = append(toolCalls, item)
 			}
-			// --- handle function call/tool_calls ---
-			if msgList.Data[i].Content[0].Type == "tool_calls" {
-				var toolCalls []struct {
-					Function struct {
-						Name      string          `json:"name"`
-						Arguments json.RawMessage `json:"arguments"`
-					} `json:"function"`
-				}
-				_ = json.Unmarshal([]byte(msgList.Data[i].Content[0].Text.Value), &toolCalls)
-				for _, call := range toolCalls {
-					if call.Function.Name == "get_available_slots_with_months" {
-						// Unmarshal 2 ชั้น
-						var argStr string
-						_ = json.Unmarshal(call.Function.Arguments, &argStr)
-						var args struct {
-							ThaiMonthYear string `json:"thai_month_year"`
+		}
+
+		if len(toolCalls) > 0 {
+			log.Printf("Processing %d function call(s) at iteration %d", len(toolCalls), iteration)
+			// Echo all output items back into input (Responses API requirement)
+			for _, raw := range respObj.Output {
+				var rawItem interface{}
+				json.Unmarshal(raw, &rawItem)
+				inputItems = append(inputItems, rawItem)
+			}
+			// Execute each function call and append its result
+			for _, call := range toolCalls {
+				result := dispatchFunctionCall(call.Name, call.Arguments, userId)
+				log.Printf("Function %s → %s", call.Name, result)
+				inputItems = append(inputItems, map[string]interface{}{
+					"type":    "function_call_output",
+					"call_id": call.CallID,
+					"output":  result,
+				})
+			}
+			continue
+		}
+
+		// Look for the assistant's text reply
+		for _, item := range parsedOutput {
+			if item.Type == "message" && item.Role == "assistant" {
+				for _, content := range item.Content {
+					if content.Type == "output_text" && content.Text != "" {
+						reply := content.Text
+						log.Printf("Assistant reply: %s", reply)
+						if !isErrorResponse(reply) {
+							userThreadLock.Lock()
+							userLastQAMap[userId] = struct {
+								Question string
+								Answer   string
+							}{Question: message, Answer: reply}
+							userThreadLock.Unlock()
 						}
-						_ = json.Unmarshal([]byte(argStr), &args)
-						fmt.Println("get_available_slots_with_months has been called")
-						fmt.Printf("Parsed arguments for get_available_slots_with_months: %+v\n", args)
-						if args.ThaiMonthYear != "" {
-							fmt.Printf("Calling Google Apps Script for month: %s\n", args.ThaiMonthYear)
-							month := args.ThaiMonthYear
-							// Call Google Apps Script
-							url := "https://script.google.com/macros/s/AKfycbwfSkwsgO56UdPHqa-KCxO7N-UDzkiMIBVjBTd0k8sowLtm7wORC-lN32IjAwtOVqMxQw/exec?sheet=" + month
-							resp, err := http.Get(url)
-							if err != nil {
-								return "Error calling Google Apps Script."
-							}
-							defer resp.Body.Close()
-							gsBody, _ := io.ReadAll(resp.Body)
-							result := string(gsBody)
-
-							// ส่งข้อมูลวันว่างกลับไปให้ GPT เพื่อสรุปให้ลูกค้า
-							msgReq := map[string]interface{}{
-								"role":    "user",
-								"content": fmt.Sprintf("วันว่างที่ได้จากระบบ: %s ช่วยสรุปให้ลูกค้าแบบสวยงาม", result),
-							}
-							msgPayload, _ := json.Marshal(msgReq)
-							msgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
-							msgReqHttp, _ := http.NewRequest("POST", msgUrl, bytes.NewReader(msgPayload))
-							msgReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
-							msgReqHttp.Header.Set("Content-Type", "application/json")
-							msgReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
-							msgResp, err := client.Do(msgReqHttp)
-							if err != nil {
-								return "Error sending slot info to GPT."
-							}
-							defer msgResp.Body.Close()
-							_, _ = io.ReadAll(msgResp.Body)
-
-							// Run assistant อีกรอบ
-							runReq := map[string]interface{}{
-								"assistant_id": assistantId,
-							}
-							runPayload, _ := json.Marshal(runReq)
-							runUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs"
-							runReqHttp, _ := http.NewRequest("POST", runUrl, bytes.NewReader(runPayload))
-							runReqHttp.Header.Set("Authorization", "Bearer "+apiKey)
-							runReqHttp.Header.Set("Content-Type", "application/json")
-							runReqHttp.Header.Set("OpenAI-Beta", "assistants=v2")
-							runResp, err := client.Do(runReqHttp)
-							if err != nil {
-								return "Error running assistant for slot summary."
-							}
-							defer runResp.Body.Close()
-							_, _ = io.ReadAll(runResp.Body)
-
-							// Poll run status
-							for j := 0; j < 20; j++ {
-								runStatusUrl := "https://api.openai.com/v1/threads/" + threadId + "/runs/" + runRespObj.ID
-								runStatusReq, _ := http.NewRequest("GET", runStatusUrl, nil)
-								runStatusReq.Header.Set("Authorization", "Bearer "+apiKey)
-								runStatusReq.Header.Set("OpenAI-Beta", "assistants=v2")
-								runStatusResp, err := client.Do(runStatusReq)
-								if err != nil {
-									return "Error polling run status for slot summary."
-								}
-								defer runStatusResp.Body.Close()
-								statusBody, _ := io.ReadAll(runStatusResp.Body)
-								var statusObj2 struct {
-									Status string `json:"status"`
-								}
-								json.Unmarshal(statusBody, &statusObj2)
-								if statusObj2.Status == "completed" {
-									break
-								}
-							}
-
-							// Get messages (last assistant message)
-							getMsgUrl := "https://api.openai.com/v1/threads/" + threadId + "/messages"
-							getMsgReq, _ := http.NewRequest("GET", getMsgUrl, nil)
-							getMsgReq.Header.Set("Authorization", "Bearer "+apiKey)
-							getMsgReq.Header.Set("OpenAI-Beta", "assistants=v2")
-							getMsgResp, err := client.Do(getMsgReq)
-							if err != nil {
-								return "Error getting slot summary from GPT."
-							}
-							defer getMsgResp.Body.Close()
-							body, _ := io.ReadAll(getMsgResp.Body)
-							var slotMsgList struct {
-								Data []struct {
-									Role    string `json:"role"`
-									Content []struct {
-										Type string `json:"type"`
-										Text struct {
-											Value string `json:"value"`
-										} `json:"text"`
-									} `json:"content"`
-								} `json:"data"`
-							}
-							json.Unmarshal(body, &slotMsgList)
-							for k := len(slotMsgList.Data) - 1; k >= 0; k-- {
-								if slotMsgList.Data[k].Role == "assistant" && len(slotMsgList.Data[k].Content) > 0 {
-									if slotMsgList.Data[k].Content[0].Type == "text" {
-										reply := slotMsgList.Data[k].Content[0].Text.Value
-										if reply != "" {
-											return reply
-										}
-									}
-								}
-							}
-						}
+						return reply
 					}
 				}
 			}
 		}
+
+		log.Printf("No text reply found in output at iteration %d", iteration)
+		break
 	}
+
+	log.Printf("getAssistantResponse: no reply generated for user %s", userId)
 	return ""
 }
 
@@ -2510,6 +2129,8 @@ func pushLineMessage(userId, message string) error {
 // ConversationSummary is a lightweight view of a conversation for the list page
 type ConversationSummary struct {
 	UserID       string `json:"user_id"`
+	DisplayName  string `json:"display_name"`
+	Nickname     string `json:"nickname"`
 	LastMessage  string `json:"last_message"`
 	LastSeen     string `json:"last_seen"`
 	Takeover     bool   `json:"takeover"`
@@ -2532,6 +2153,8 @@ func handleGetConversations(c *fiber.Ctx) error {
 		}
 		summaries = append(summaries, ConversationSummary{
 			UserID:       conv.UserID,
+			DisplayName:  conv.DisplayName,
+			Nickname:     conv.Nickname,
 			LastMessage:  lastMsg,
 			LastSeen:     conv.LastSeen,
 			Takeover:     conv.Takeover,
@@ -2575,6 +2198,7 @@ func handleTakeoverConversation(c *fiber.Ctx) error {
 	userConversations[userId].Takeover = true
 	userThreadLock.Unlock()
 
+	go saveConversations()
 	log.Printf("Admin took over conversation for user %s", userId)
 	return c.JSON(fiber.Map{"status": "ok", "takeover": true})
 }
@@ -2592,6 +2216,7 @@ func handleReleaseConversation(c *fiber.Ctx) error {
 	}
 	userThreadLock.Unlock()
 
+	go saveConversations()
 	log.Printf("Admin released conversation for user %s - AI resumed", userId)
 	return c.JSON(fiber.Map{"status": "ok", "takeover": false})
 }
@@ -2624,6 +2249,28 @@ func handleAdminReply(c *fiber.Ctx) error {
 	userConversations[userId].appendMessage("admin", req.Message)
 	userThreadLock.Unlock()
 
+	go saveConversations()
 	log.Printf("Admin replied to user %s: %s", userId, req.Message)
+	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+func handleSetNickname(c *fiber.Ctx) error {
+	userId := c.Params("userId")
+	if userId == "" {
+		return respondError(c, fiber.StatusBadRequest, "userId is required")
+	}
+	var req struct {
+		Nickname string `json:"nickname"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return respondError(c, fiber.StatusBadRequest, "invalid request")
+	}
+	userThreadLock.Lock()
+	if _, ok := userConversations[userId]; !ok {
+		userConversations[userId] = &UserConversation{UserID: userId}
+	}
+	userConversations[userId].Nickname = strings.TrimSpace(req.Nickname)
+	userThreadLock.Unlock()
+	go saveConversations()
 	return c.JSON(fiber.Map{"status": "ok"})
 }
