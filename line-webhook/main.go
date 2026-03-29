@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -84,13 +85,14 @@ type ConversationMessage struct {
 
 // UserConversation tracks the full state for a LINE user conversation
 type UserConversation struct {
-	UserID      string                `json:"user_id"`
-	DisplayName string                `json:"display_name"` // fetched from LINE profile API
-	Nickname    string                `json:"nickname"`     // set by admin
-	Messages    []ConversationMessage `json:"messages"`
-	Takeover    bool                  `json:"takeover"`    // human agent took over
-	WantsHuman  bool                  `json:"wants_human"` // customer requested a human
-	LastSeen    string                `json:"last_seen"`
+	UserID          string                `json:"user_id"`
+	DisplayName     string                `json:"display_name"` // fetched from LINE profile API
+	Nickname        string                `json:"nickname"`     // set by admin
+	Messages        []ConversationMessage `json:"messages"`
+	Takeover        bool                  `json:"takeover"`    // human agent took over
+	WantsHuman      bool                  `json:"wants_human"` // customer requested a human
+	LastSeen        string                `json:"last_seen"`
+	LastAdminAction time.Time             `json:"last_admin_action"` // last time admin acted (takeover or reply)
 }
 
 func (c *UserConversation) appendMessage(role, text string) {
@@ -105,8 +107,8 @@ func (c *UserConversation) appendMessage(role, text string) {
 	}
 }
 
-const pricingConfigFile = "pricing_config.json"
-const conversationsFile = "conversations.json"
+var pricingConfigFile = "pricing_config.json"
+var conversationsFile = "conversations.json"
 
 // saveConversations persists userConversations to disk so history survives re-deploys.
 func saveConversations() {
@@ -600,6 +602,13 @@ var (
 )
 
 func main() {
+	// Set data file paths from DATA_DIR env var (for persistent disk on Render etc.)
+	if dir := os.Getenv("DATA_DIR"); dir != "" {
+		pricingConfigFile = filepath.Join(dir, "pricing_config.json")
+		conversationsFile = filepath.Join(dir, "conversations.json")
+		log.Printf("Data directory: %s", dir)
+	}
+
 	// Load pricing configuration
 	if err := loadPricingConfig(); err != nil {
 		log.Fatal("Failed to load pricing configuration:", err)
@@ -613,6 +622,31 @@ func main() {
 	}
 	// Restore conversation history from previous run
 	loadConversationsFromFile()
+
+	// Auto-release admin takeover after 30 minutes of inactivity
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			userThreadLock.Lock()
+			var released []string
+			for uid, conv := range userConversations {
+				if conv.Takeover && !conv.LastAdminAction.IsZero() && now.Sub(conv.LastAdminAction) >= 30*time.Minute {
+					conv.Takeover = false
+					conv.WantsHuman = false
+					released = append(released, uid)
+				}
+			}
+			userThreadLock.Unlock()
+			if len(released) > 0 {
+				for _, uid := range released {
+					log.Printf("Auto-released takeover for user %s after 30 min admin inactivity", uid)
+				}
+				go saveConversations()
+			}
+		}
+	}()
 
 	app := fiber.New()
 
@@ -1150,7 +1184,7 @@ func getAssistantResponse(userId, message string) string {
 	// Loop to handle function/tool calls (Responses API is synchronous — no polling needed)
 	for iteration := 0; iteration < 10; iteration++ {
 		payload := map[string]interface{}{
-			"model":        "gpt-4.1",
+			"model":        "gpt-4.1-mini",
 			"instructions": systemInstructions,
 			"input":        inputItems,
 			"tools":        toolDefinitions,
@@ -2196,6 +2230,7 @@ func handleTakeoverConversation(c *fiber.Ctx) error {
 		userConversations[userId] = &UserConversation{UserID: userId}
 	}
 	userConversations[userId].Takeover = true
+	userConversations[userId].LastAdminAction = time.Now()
 	userThreadLock.Unlock()
 
 	go saveConversations()
@@ -2247,6 +2282,7 @@ func handleAdminReply(c *fiber.Ctx) error {
 		userConversations[userId] = &UserConversation{UserID: userId}
 	}
 	userConversations[userId].appendMessage("admin", req.Message)
+	userConversations[userId].LastAdminAction = time.Now()
 	userThreadLock.Unlock()
 
 	go saveConversations()
