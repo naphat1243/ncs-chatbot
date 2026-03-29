@@ -976,37 +976,67 @@ details summary {
 }
 
 .unread-badge {
-    color: #e53935;
-    font-size: 10px;
-    margin-left: 4px;
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    background: #e53935;
+    border-radius: 50%;
+    margin-left: 6px;
     vertical-align: middle;
-    line-height: 1;
+    flex-shrink: 0;
+}
+
+.conv-item.has-unread {
+    background: #fff8f8;
 }
 
 .conv-item.has-unread .conv-uid {
     font-weight: 700;
-    color: #1a73e8;
+    color: #c0392b;
 }
 
 .new-msg-banner {
-    position: sticky;
-    bottom: 12px;
-    align-self: center;
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
     background: #1a73e8;
     color: #fff;
-    padding: 8px 20px;
+    padding: 9px 22px;
     border-radius: 20px;
     cursor: pointer;
     font-size: 13px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.22);
-    z-index: 10;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.28);
+    z-index: 20;
     white-space: nowrap;
-    margin-top: auto;
     display: none;
+    align-items: center;
+    gap: 6px;
 }
 
 .new-msg-banner:hover {
     background: #1557b0;
+}
+
+.unread-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 14px 0 8px;
+    color: #1a73e8;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    flex-shrink: 0;
+}
+
+.unread-divider::before,
+.unread-divider::after {
+    content: '';
+    flex: 1;
+    height: 1.5px;
+    background: linear-gradient(90deg, transparent, #1a73e8 30%, #1a73e8 70%, transparent);
+    opacity: 0.55;
 }
 
 .msg-row {

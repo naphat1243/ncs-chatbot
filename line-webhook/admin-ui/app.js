@@ -799,7 +799,7 @@ function renderConvList() {
       // Unread badge: new messages since admin last read this conversation
       const lastRead = convState.lastReadTimestamp[c.user_id];
       const hasUnread = !isActive && c.last_seen && (!lastRead || c.last_seen > lastRead);
-      const unreadBadge = hasUnread ? '<span class="unread-badge">●</span>' : "";
+      const unreadBadge = hasUnread ? '<span class="unread-badge" title="มีข้อความใหม่"></span>' : "";
       return `<div class="conv-item${isActive ? " active" : ""}${hasUnread ? " has-unread" : ""}" data-uid="${escapeAttr(c.user_id)}">
         <div class="conv-item-top">
           <span class="conv-uid">${escapeHtml(displayName)}</span>
@@ -884,6 +884,9 @@ function renderConvThread(conv) {
     convEls.messages.innerHTML = '<p class="conv-empty" style="margin-top:60px">ยังไม่มีข้อความ</p>';
     return;
   }
+  const lastRead = convState.lastReadTimestamp[conv.user_id];
+  let unreadDividerAdded = false;
+
   convEls.messages.innerHTML = msgs
     .map((m) => {
       const cls =
@@ -891,7 +894,13 @@ function renderConvThread(conv) {
       const label =
         m.role === "customer" ? "👤 ลูกค้า" : m.role === "admin" ? "👨\u200d💼 Admin" : "🤖 AI";
       const time = m.timestamp ? m.timestamp.replace("T", " ") : "";
-      return `<div class="msg-row ${m.role}">
+      // Insert unread divider before the first unread non-admin message
+      let divider = "";
+      if (!unreadDividerAdded && m.role !== 'admin' && m.timestamp && lastRead && m.timestamp > lastRead) {
+        unreadDividerAdded = true;
+        divider = '<div class="unread-divider" id="unreadDivider"><span>ข้อความใหม่</span></div>';
+      }
+      return `${divider}<div class="msg-row ${m.role}">
         <div class="bubble ${cls}">
           <div class="bubble-label">${label} <span class="bubble-time">${escapeHtml(time)}</span></div>
           <div class="bubble-text">${escapeHtml(m.text)}</div>
@@ -899,60 +908,57 @@ function renderConvThread(conv) {
       </div>`;
     })
     .join("");
-  // Scroll to bottom only when admin just opened this conversation OR is already near the bottom.
-  // This prevents the 8-second poll from jumping admin back to the bottom while reading old messages.
+
   const msgEl = convEls.messages;
+  const dividerEl = msgEl.querySelector('#unreadDivider');
   const isNearBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 120;
-  if (convState.forceScrollBottom || isNearBottom) {
+
+  if (convState.forceScrollBottom) {
+    if (dividerEl) {
+      // Scroll to unread divider so admin sees where new messages start
+      msgEl.scrollTop = Math.max(0, dividerEl.offsetTop - 60);
+      showNewMsgBanner(msgEl); // banner lets admin jump to very bottom
+    } else {
+      msgEl.scrollTop = msgEl.scrollHeight;
+      if (conv.last_seen) convState.lastReadTimestamp[conv.user_id] = conv.last_seen;
+      hideNewMsgBanner();
+    }
+  } else if (isNearBottom) {
     msgEl.scrollTop = msgEl.scrollHeight;
-    // Mark as read when we scroll to bottom
     if (conv.last_seen) convState.lastReadTimestamp[conv.user_id] = conv.last_seen;
     hideNewMsgBanner();
   } else {
-    // Admin is scrolled up — show new message banner if there are unread messages
-    const lastRead = convState.lastReadTimestamp[conv.user_id];
-    const hasNewMsgs = msgs.some(m => m.role !== 'admin' && m.timestamp && (!lastRead || m.timestamp > lastRead));
-    if (hasNewMsgs) showNewMsgBanner(msgEl);
+    // Admin is scrolled up — show banner if there are unread messages
+    if (dividerEl) showNewMsgBanner(msgEl);
+    else hideNewMsgBanner();
   }
   convState.forceScrollBottom = false;
 }
 
 function showNewMsgBanner(msgEl) {
-  let banner = document.getElementById('newMsgBanner');
+  // Banner must live inside the scroll container for absolute positioning to work
+  let banner = msgEl.querySelector('#newMsgBanner');
   if (!banner) {
     banner = document.createElement('div');
     banner.id = 'newMsgBanner';
     banner.className = 'new-msg-banner';
     banner.textContent = '💬 มีข้อความใหม่ — คลิกเพื่อดู';
-    banner.addEventListener('click', () => {
-      msgEl.scrollTop = msgEl.scrollHeight;
-      const userId = convState.selectedUserId;
-      const conv = convState.conversations.find(c => c.user_id === userId);
-      if (conv && conv.last_seen) convState.lastReadTimestamp[userId] = conv.last_seen;
-      hideNewMsgBanner();
-      renderConvList();
-    });
-    msgEl.parentElement.appendChild(banner);
-  } else {
-    // Re-attach click so msgEl reference is always current
-    const old = banner.cloneNode(true);
-    banner.parentElement?.replaceChild(old, banner);
-    old.addEventListener('click', () => {
-      msgEl.scrollTop = msgEl.scrollHeight;
-      const userId = convState.selectedUserId;
-      const conv = convState.conversations.find(c => c.user_id === userId);
-      if (conv && conv.last_seen) convState.lastReadTimestamp[userId] = conv.last_seen;
-      hideNewMsgBanner();
-      renderConvList();
-    });
+    msgEl.appendChild(banner);
   }
-  banner = document.getElementById('newMsgBanner');
-  if (banner) banner.style.display = '';
+  banner.onclick = () => {
+    msgEl.scrollTop = msgEl.scrollHeight;
+    const userId = convState.selectedUserId;
+    const conv = convState.conversations.find(c => c.user_id === userId);
+    if (conv && conv.last_seen) convState.lastReadTimestamp[userId] = conv.last_seen;
+    hideNewMsgBanner();
+    renderConvList();
+  };
+  banner.style.display = 'flex';
 }
 
 function hideNewMsgBanner() {
-  const banner = document.getElementById('newMsgBanner');
-  if (banner) banner.style.display = 'none';
+  // Search both inside msgEl and anywhere in doc (handle stale nodes)
+  document.querySelectorAll('#newMsgBanner').forEach(el => el.style.display = 'none');
 }
 
 convEls.btnTakeover?.addEventListener("click", async () => {
