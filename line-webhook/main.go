@@ -1150,7 +1150,7 @@ func getAssistantResponse(userId, message string) string {
 	// Loop to handle function/tool calls (Responses API is synchronous — no polling needed)
 	for iteration := 0; iteration < 10; iteration++ {
 		payload := map[string]interface{}{
-			"model":        "gpt-4o",
+			"model":        "gpt-4.1",
 			"instructions": systemInstructions,
 			"input":        inputItems,
 			"tools":        toolDefinitions,
