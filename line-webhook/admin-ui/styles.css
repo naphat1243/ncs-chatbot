@@ -972,6 +972,41 @@ details summary {
     flex-direction: column;
     gap: 10px;
     background: #f8faff;
+    position: relative;
+}
+
+.unread-badge {
+    color: #e53935;
+    font-size: 10px;
+    margin-left: 4px;
+    vertical-align: middle;
+    line-height: 1;
+}
+
+.conv-item.has-unread .conv-uid {
+    font-weight: 700;
+    color: #1a73e8;
+}
+
+.new-msg-banner {
+    position: sticky;
+    bottom: 12px;
+    align-self: center;
+    background: #1a73e8;
+    color: #fff;
+    padding: 8px 20px;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 13px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.22);
+    z-index: 10;
+    white-space: nowrap;
+    margin-top: auto;
+    display: none;
+}
+
+.new-msg-banner:hover {
+    background: #1557b0;
 }
 
 .msg-row {

@@ -717,6 +717,7 @@ const convState = {
   selectedUserId: null,
   pollTimer: null,
   forceScrollBottom: false, // set true when admin opens a conversation
+  lastReadTimestamp: {}, // userId -> ISO timestamp of last message seen
 };
 
 const convEls = {
@@ -795,10 +796,14 @@ function renderConvList() {
         : "<em>ไม่มีข้อความ</em>";
       const msgCount = `<small>${c.message_count} ข้อความ</small>`;
       const lastSeen = c.last_seen ? `<small>${c.last_seen.replace("T", " ")}</small>` : "";
-      return `<div class="conv-item${isActive ? " active" : ""}" data-uid="${escapeAttr(c.user_id)}">
+      // Unread badge: new messages since admin last read this conversation
+      const lastRead = convState.lastReadTimestamp[c.user_id];
+      const hasUnread = !isActive && c.last_seen && (!lastRead || c.last_seen > lastRead);
+      const unreadBadge = hasUnread ? '<span class="unread-badge">●</span>' : "";
+      return `<div class="conv-item${isActive ? " active" : ""}${hasUnread ? " has-unread" : ""}" data-uid="${escapeAttr(c.user_id)}">
         <div class="conv-item-top">
           <span class="conv-uid">${escapeHtml(displayName)}</span>
-          ${alertBadge}${takeoverBadge}
+          ${unreadBadge}${alertBadge}${takeoverBadge}
         </div>
         <div class="conv-item-preview">${lastMsg}</div>
         <div class="conv-item-meta">${msgCount} ${lastSeen}</div>
@@ -816,6 +821,12 @@ async function selectConversation(userId) {
   convState.forceScrollBottom = true; // always scroll to bottom when opening a conversation
   renderConvList(); // re-render to update active
   await refreshConvThread(userId);
+  // Mark all messages as read when opening conversation
+  const conv = convState.conversations.find(c => c.user_id === userId);
+  if (conv && conv.last_seen) {
+    convState.lastReadTimestamp[userId] = conv.last_seen;
+  }
+  renderConvList(); // re-render to clear unread badge
 }
 
 async function refreshConvThread(userId) {
@@ -878,7 +889,7 @@ function renderConvThread(conv) {
       const cls =
         m.role === "customer" ? "bubble-customer" : m.role === "admin" ? "bubble-admin" : "bubble-ai";
       const label =
-        m.role === "customer" ? "👤 ลูกค้า" : m.role === "admin" ? "👨‍💼 Admin" : "🤖 AI";
+        m.role === "customer" ? "👤 ลูกค้า" : m.role === "admin" ? "👨\u200d💼 Admin" : "🤖 AI";
       const time = m.timestamp ? m.timestamp.replace("T", " ") : "";
       return `<div class="msg-row ${m.role}">
         <div class="bubble ${cls}">
@@ -894,8 +905,54 @@ function renderConvThread(conv) {
   const isNearBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 120;
   if (convState.forceScrollBottom || isNearBottom) {
     msgEl.scrollTop = msgEl.scrollHeight;
+    // Mark as read when we scroll to bottom
+    if (conv.last_seen) convState.lastReadTimestamp[conv.user_id] = conv.last_seen;
+    hideNewMsgBanner();
+  } else {
+    // Admin is scrolled up — show new message banner if there are unread messages
+    const lastRead = convState.lastReadTimestamp[conv.user_id];
+    const hasNewMsgs = msgs.some(m => m.role !== 'admin' && m.timestamp && (!lastRead || m.timestamp > lastRead));
+    if (hasNewMsgs) showNewMsgBanner(msgEl);
   }
   convState.forceScrollBottom = false;
+}
+
+function showNewMsgBanner(msgEl) {
+  let banner = document.getElementById('newMsgBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'newMsgBanner';
+    banner.className = 'new-msg-banner';
+    banner.textContent = '💬 มีข้อความใหม่ — คลิกเพื่อดู';
+    banner.addEventListener('click', () => {
+      msgEl.scrollTop = msgEl.scrollHeight;
+      const userId = convState.selectedUserId;
+      const conv = convState.conversations.find(c => c.user_id === userId);
+      if (conv && conv.last_seen) convState.lastReadTimestamp[userId] = conv.last_seen;
+      hideNewMsgBanner();
+      renderConvList();
+    });
+    msgEl.parentElement.appendChild(banner);
+  } else {
+    // Re-attach click so msgEl reference is always current
+    const old = banner.cloneNode(true);
+    banner.parentElement?.replaceChild(old, banner);
+    old.addEventListener('click', () => {
+      msgEl.scrollTop = msgEl.scrollHeight;
+      const userId = convState.selectedUserId;
+      const conv = convState.conversations.find(c => c.user_id === userId);
+      if (conv && conv.last_seen) convState.lastReadTimestamp[userId] = conv.last_seen;
+      hideNewMsgBanner();
+      renderConvList();
+    });
+  }
+  banner = document.getElementById('newMsgBanner');
+  if (banner) banner.style.display = '';
+}
+
+function hideNewMsgBanner() {
+  const banner = document.getElementById('newMsgBanner');
+  if (banner) banner.style.display = 'none';
 }
 
 convEls.btnTakeover?.addEventListener("click", async () => {
