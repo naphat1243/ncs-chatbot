@@ -750,6 +750,8 @@ func main() {
 					conv.LastSeen = getBangkokTime()
 					if detectHumanRequest(messageContent) || detectAdminAlert(messageContent) {
 						conv.WantsHuman = true
+						conv.Takeover = true              // Stop AI immediately
+						conv.LastAdminAction = time.Now() // Start 30-min inactivity clock
 					}
 					displayMsg := messageContent
 					if strings.Contains(messageContent, "data:image") {
@@ -2141,9 +2143,8 @@ func detectHumanRequest(msg string) bool {
 	return false
 }
 
-// detectAdminAlert returns true when the message signals a bulk/B2B order
-// that requires admin decision-making.
-// Note: special deal requests for normal quantities are handled by AI (existing promotions cover them).
+// detectAdminAlert returns true when the message signals a bulk/B2B order or special deal
+// that requires admin decision-making (AI will stop and SOS will be raised).
 func detectAdminAlert(msg string) bool {
 	lower := strings.ToLower(msg)
 	keywords := []string{
