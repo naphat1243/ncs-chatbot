@@ -14,8 +14,8 @@
         <header class="hero">
             <div>
                 <p class="eyebrow">NCS Cleaning Concierge</p>
-                <h1>💰 ราคาและโปรโมชั่น</h1>
-                <p class="subtitle">เปลี่ยนราคาบริการ แก้ไขโปรโมชั่น และจัดการราคาพิเศษได้ง่ายๆ ไม่ต้องเขียนโค้ด</p>
+                <h1>🤖 Admin Dashboard</h1>
+                <p class="subtitle">จัดการบทสนทนา ราคา และโปรโมชั่นของ NCS Chatbot</p>
             </div>
             <div class="token-card">
                 <div class="token-header">
@@ -30,6 +30,51 @@
             </div>
         </header>
 
+        <!-- Tab navigation -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="conversations">💬 บทสนทนาลูกค้า</button>
+            <button class="tab-btn" data-tab="pricing">💰 ราคาและโปรโมชั่น</button>
+        </nav>
+
+        <!-- ===== TAB: Conversations ===== -->
+        <div id="tab-conversations" class="tab-panel active">
+            <div class="chat-layout">
+                <!-- Left: conversation list -->
+                <aside class="conv-list-panel">
+                    <div class="conv-list-header">
+                        <h3>👥 ลูกค้า</h3>
+                        <button id="refreshConversationsBtn" type="button" class="btn-sm">🔄</button>
+                    </div>
+                    <div id="convList" class="conv-list">
+                        <p class="conv-empty">ยังไม่มีบทสนทนา</p>
+                    </div>
+                </aside>
+
+                <!-- Right: message thread + reply -->
+                <section class="conv-thread-panel">
+                    <div id="convThreadHeader" class="conv-thread-header" style="display:none">
+                        <div class="conv-thread-title">
+                            <span id="convThreadUserId"></span>
+                            <span id="convStatusBadge" class="conv-status-badge"></span>
+                        </div>
+                        <div class="conv-thread-actions">
+                            <button id="btnTakeover" type="button" class="btn-takeover">🛑 หยุด AI / รับสายเอง</button>
+                            <button id="btnRelease" type="button" class="btn-release" style="display:none">🤖 คืนให้ AI</button>
+                        </div>
+                    </div>
+                    <div id="convMessages" class="conv-messages">
+                        <p class="conv-empty" style="margin-top:80px">เลือกลูกค้าเพื่อดูบทสนทนา</p>
+                    </div>
+                    <div id="convReplyBar" class="conv-reply-bar" style="display:none">
+                        <textarea id="convReplyInput" placeholder="พิมพ์ข้อความตอบกลับ... (Ctrl+Enter ส่ง)" rows="2"></textarea>
+                        <button id="convReplyBtn" type="button" class="primary">📤 ส่ง</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- ===== TAB: Pricing ===== -->
+        <div id="tab-pricing" class="tab-panel" style="display:none">
         <main class="grid">
                 <section class="card wide" id="overviewCard">
                     <header>
@@ -138,6 +183,7 @@
                     </details>
                 </section>
             </main>
+        </div><!-- end tab-pricing -->
     </div>
 
     <div id="toast" class="toast"></div>

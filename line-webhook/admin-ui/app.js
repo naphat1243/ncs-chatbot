@@ -670,3 +670,245 @@ window.onclick = function(event) {
 if (state.token) {
   refreshConfig();
 }
+
+// ===== TAB SWITCHING =====
+const tabBtns = document.querySelectorAll(".tab-btn");
+const tabPanels = document.querySelectorAll(".tab-panel");
+
+tabBtns.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const target = btn.dataset.tab;
+    tabBtns.forEach((b) => b.classList.remove("active"));
+    tabPanels.forEach((p) => (p.style.display = "none"));
+    btn.classList.add("active");
+    document.getElementById(`tab-${target}`).style.display = "";
+    if (target === "conversations") {
+      refreshConversations();
+    }
+  });
+});
+
+// ===== CONVERSATIONS =====
+const convState = {
+  conversations: [],
+  selectedUserId: null,
+  pollTimer: null,
+};
+
+const convEls = {
+  list: document.getElementById("convList"),
+  threadHeader: document.getElementById("convThreadHeader"),
+  threadUserId: document.getElementById("convThreadUserId"),
+  statusBadge: document.getElementById("convStatusBadge"),
+  messages: document.getElementById("convMessages"),
+  replyBar: document.getElementById("convReplyBar"),
+  replyInput: document.getElementById("convReplyInput"),
+  replyBtn: document.getElementById("convReplyBtn"),
+  btnTakeover: document.getElementById("btnTakeover"),
+  btnRelease: document.getElementById("btnRelease"),
+  refreshBtn: document.getElementById("refreshConversationsBtn"),
+};
+
+const refreshConversations = async () => {
+  try {
+    const data = await adminFetch("/admin/conversations");
+    // Sort: wants_human first, then by last_seen desc
+    data.sort((a, b) => {
+      if (a.wants_human !== b.wants_human) return a.wants_human ? -1 : 1;
+      return (b.last_seen || "").localeCompare(a.last_seen || "");
+    });
+    convState.conversations = data;
+    renderConvList();
+    if (convState.selectedUserId) {
+      refreshConvThread(convState.selectedUserId);
+    }
+  } catch (err) {
+    // silently ignore polling errors
+  }
+};
+
+function renderConvList() {
+  const list = convEls.list;
+  if (!list) return;
+  if (!convState.conversations.length) {
+    list.innerHTML = '<p class="conv-empty">ยังไม่มีบทสนทนา</p>';
+    return;
+  }
+  list.innerHTML = convState.conversations
+    .map((c) => {
+      const isActive = c.user_id === convState.selectedUserId;
+      const shortId = c.user_id ? c.user_id.slice(-8) : "?";
+      const alertBadge = c.wants_human ? '<span class="alert-badge">🆘 ขอคุย</span>' : "";
+      const takeoverBadge = c.takeover
+        ? '<span class="mode-badge human">👤 Admin</span>'
+        : '<span class="mode-badge ai">🤖 AI</span>';
+      const lastMsg = c.last_message
+        ? escapeHtml(c.last_message).slice(0, 55) + (c.last_message.length > 55 ? "…" : "")
+        : "<em>ไม่มีข้อความ</em>";
+      const msgCount = `<small>${c.message_count} ข้อความ</small>`;
+      const lastSeen = c.last_seen ? `<small>${c.last_seen.replace("T", " ")}</small>` : "";
+      return `<div class="conv-item${isActive ? " active" : ""}" data-uid="${escapeAttr(c.user_id)}">
+        <div class="conv-item-top">
+          <span class="conv-uid">…${shortId}</span>
+          ${alertBadge}${takeoverBadge}
+        </div>
+        <div class="conv-item-preview">${lastMsg}</div>
+        <div class="conv-item-meta">${msgCount} ${lastSeen}</div>
+      </div>`;
+    })
+    .join("");
+
+  list.querySelectorAll(".conv-item").forEach((el) => {
+    el.addEventListener("click", () => selectConversation(el.dataset.uid));
+  });
+}
+
+async function selectConversation(userId) {
+  convState.selectedUserId = userId;
+  renderConvList(); // re-render to update active
+  await refreshConvThread(userId);
+}
+
+async function refreshConvThread(userId) {
+  try {
+    const conv = await adminFetch(`/admin/conversations/${encodeURIComponent(userId)}`);
+    renderConvThread(conv);
+  } catch (err) {
+    // ignore
+  }
+}
+
+function renderConvThread(conv) {
+  if (!conv) return;
+
+  // Header
+  if (convEls.threadHeader) convEls.threadHeader.style.display = "";
+  if (convEls.threadUserId) convEls.threadUserId.textContent = `ลูกค้า: ${conv.user_id}`;
+
+  const badge = convEls.statusBadge;
+  if (badge) {
+    if (conv.wants_human && !conv.takeover) {
+      badge.textContent = "🆘 ลูกค้าขอคุยกับคน";
+      badge.className = "conv-status-badge alert";
+    } else if (conv.takeover) {
+      badge.textContent = "👤 Admin กำลังตอบ";
+      badge.className = "conv-status-badge human";
+    } else {
+      badge.textContent = "🤖 AI กำลังตอบ";
+      badge.className = "conv-status-badge ai";
+    }
+  }
+
+  // Takeover/release buttons
+  if (convEls.btnTakeover) {
+    convEls.btnTakeover.style.display = conv.takeover ? "none" : "";
+  }
+  if (convEls.btnRelease) {
+    convEls.btnRelease.style.display = conv.takeover ? "" : "none";
+  }
+
+  // Reply bar - always visible
+  if (convEls.replyBar) convEls.replyBar.style.display = "";
+
+  // Messages
+  const msgs = conv.messages || [];
+  if (!msgs.length) {
+    convEls.messages.innerHTML = '<p class="conv-empty" style="margin-top:60px">ยังไม่มีข้อความ</p>';
+    return;
+  }
+  convEls.messages.innerHTML = msgs
+    .map((m) => {
+      const cls =
+        m.role === "customer" ? "bubble-customer" : m.role === "admin" ? "bubble-admin" : "bubble-ai";
+      const label =
+        m.role === "customer" ? "👤 ลูกค้า" : m.role === "admin" ? "👨‍💼 Admin" : "🤖 AI";
+      const time = m.timestamp ? m.timestamp.replace("T", " ") : "";
+      return `<div class="msg-row ${m.role}">
+        <div class="bubble ${cls}">
+          <div class="bubble-label">${label} <span class="bubble-time">${escapeHtml(time)}</span></div>
+          <div class="bubble-text">${escapeHtml(m.text)}</div>
+        </div>
+      </div>`;
+    })
+    .join("");
+  // Scroll to bottom
+  convEls.messages.scrollTop = convEls.messages.scrollHeight;
+}
+
+convEls.btnTakeover?.addEventListener("click", async () => {
+  if (!convState.selectedUserId) return;
+  try {
+    await adminFetch(`/admin/conversations/${encodeURIComponent(convState.selectedUserId)}/takeover`, {
+      method: "POST",
+    });
+    showToast("หยุด AI แล้ว - Admin รับสายแล้ว 👤");
+    await refreshConvThread(convState.selectedUserId);
+    await refreshConversations();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+});
+
+convEls.btnRelease?.addEventListener("click", async () => {
+  if (!convState.selectedUserId) return;
+  try {
+    await adminFetch(`/admin/conversations/${encodeURIComponent(convState.selectedUserId)}/release`, {
+      method: "POST",
+    });
+    showToast("คืนให้ AI แล้ว 🤖");
+    await refreshConvThread(convState.selectedUserId);
+    await refreshConversations();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+});
+
+async function sendAdminReply() {
+  const msg = convEls.replyInput?.value?.trim();
+  if (!msg || !convState.selectedUserId) return;
+  try {
+    await adminFetch(`/admin/conversations/${encodeURIComponent(convState.selectedUserId)}/reply`, {
+      method: "POST",
+      body: JSON.stringify({ message: msg }),
+    });
+    convEls.replyInput.value = "";
+    showToast("ส่งข้อความแล้ว ✅");
+    await refreshConvThread(convState.selectedUserId);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+convEls.replyBtn?.addEventListener("click", sendAdminReply);
+
+convEls.replyInput?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.ctrlKey) {
+    e.preventDefault();
+    sendAdminReply();
+  }
+});
+
+convEls.refreshBtn?.addEventListener("click", refreshConversations);
+
+// Auto-poll conversations every 8 seconds while on conversations tab
+setInterval(() => {
+  const activeTab = document.querySelector(".tab-btn.active");
+  if (activeTab?.dataset?.tab === "conversations") {
+    refreshConversations();
+  }
+}, 8000);
+
+// Helper: escape HTML
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/\n/g, "<br>");
+}
+function escapeAttr(str) {
+  if (!str) return "";
+  return String(str).replace(/"/g, "&quot;");
+}

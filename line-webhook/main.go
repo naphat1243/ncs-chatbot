@@ -76,6 +76,34 @@ type CustomerTypeConfig struct {
 	Aliases []string `json:"aliases"`
 }
 
+// ConversationMessage stores a single message in a conversation history
+type ConversationMessage struct {
+	Role      string `json:"role"` // "customer", "ai", "admin"
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"` // Bangkok time
+}
+
+// UserConversation tracks the full state for a LINE user conversation
+type UserConversation struct {
+	UserID     string                `json:"user_id"`
+	Messages   []ConversationMessage `json:"messages"`
+	Takeover   bool                  `json:"takeover"`    // human agent took over
+	WantsHuman bool                  `json:"wants_human"` // customer requested a human
+	LastSeen   string                `json:"last_seen"`
+}
+
+func (c *UserConversation) appendMessage(role, text string) {
+	c.Messages = append(c.Messages, ConversationMessage{
+		Role:      role,
+		Text:      text,
+		Timestamp: getBangkokTime(),
+	})
+	const maxConvMessages = 200
+	if len(c.Messages) > maxConvMessages {
+		c.Messages = c.Messages[len(c.Messages)-maxConvMessages:]
+	}
+}
+
 const pricingConfigFile = "pricing_config.json"
 
 var pricingConfig *PricingConfig
@@ -491,6 +519,8 @@ var (
 
 	userMsgBuffer = make(map[string][]string) // buffer for each user
 	userMsgTimer  = make(map[string]*time.Timer)
+
+	userConversations = make(map[string]*UserConversation) // conversation history per user
 )
 
 func main() {
@@ -539,6 +569,12 @@ func main() {
 	adminGroup.Post("/config/pricing/price", handleUpdatePriceEntry)
 	adminGroup.Post("/config/pricing/promotion", handleUpdatePromotionEntry)
 
+	adminGroup.Get("/conversations", handleGetConversations)
+	adminGroup.Get("/conversations/:userId", handleGetConversationMessages)
+	adminGroup.Post("/conversations/:userId/takeover", handleTakeoverConversation)
+	adminGroup.Post("/conversations/:userId/release", handleReleaseConversation)
+	adminGroup.Post("/conversations/:userId/reply", handleAdminReply)
+
 	app.Post("/webhook", func(c *fiber.Ctx) error {
 		var event LineEvent
 		if err := json.Unmarshal(c.Body(), &event); err != nil {
@@ -571,6 +607,23 @@ func main() {
 				userThreadLock.Lock()
 				userMsgBuffer[userId] = append(userMsgBuffer[userId], messageContent)
 
+				// Record customer message in conversation history
+				if _, ok := userConversations[userId]; !ok {
+					userConversations[userId] = &UserConversation{UserID: userId}
+				}
+				{
+					conv := userConversations[userId]
+					conv.LastSeen = getBangkokTime()
+					if detectHumanRequest(messageContent) {
+						conv.WantsHuman = true
+					}
+					displayMsg := messageContent
+					if strings.Contains(messageContent, "data:image") {
+						displayMsg = "[รูปภาพ]"
+					}
+					conv.appendMessage("customer", displayMsg)
+				}
+
 				// Stop existing timer if any
 				if timer, ok := userMsgTimer[userId]; ok {
 					timer.Stop()
@@ -601,8 +654,26 @@ func main() {
 						log.Printf("Multiple messages (%d) from user %s: %v", len(msgs), userId, msgs)
 					}
 
+					// Check if human takeover is active - skip AI if so
+					userThreadLock.Lock()
+					takeoverActive := userConversations[userId] != nil && userConversations[userId].Takeover
+					userThreadLock.Unlock()
+					if takeoverActive {
+						log.Printf("Human takeover active for user %s, skipping AI response", userId)
+						return
+					}
+
 					responseText := getAssistantResponse(userId, summary)
 					replyToLine(replyToken, responseText)
+
+					// Record AI response in conversation history
+					if responseText != "" {
+						userThreadLock.Lock()
+						if conv, ok := userConversations[userId]; ok {
+							conv.appendMessage("ai", responseText)
+						}
+						userThreadLock.Unlock()
+					}
 				})
 
 				userMsgTimer[userId] = t
@@ -2376,4 +2447,183 @@ func replyToLine(replyToken, message string) {
 		body, _ := io.ReadAll(resp.Body)
 		log.Println("LINE reply error:", string(body))
 	}
+}
+
+// detectHumanRequest returns true when the message signals a request for a human agent
+func detectHumanRequest(msg string) bool {
+	lower := strings.ToLower(msg)
+	keywords := []string{
+		"ขอคุยกับคน", "อยากคุยกับคน", "ต้องการคุยกับคน",
+		"ขอพนักงาน", "อยากคุยกับพนักงาน", "คุยกับพนักงาน",
+		"ขอเจ้าหน้าที่", "อยากคุยกับเจ้าหน้าที่",
+		"คุยกับคนได้ไหม", "มีคนตอบไหม", "ขอให้คนตอบ",
+		"คนจริงๆ", "ไม่ใช่บอท", "ไม่ใช่ai",
+		"human agent", "speak to human", "talk to human",
+		"real person",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// pushLineMessage sends a push message to a LINE user via the Push API
+func pushLineMessage(userId, message string) error {
+	channelToken := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
+	if channelToken == "" {
+		return fmt.Errorf("LINE channel access token not set")
+	}
+	payload := map[string]interface{}{
+		"to": userId,
+		"messages": []map[string]string{{
+			"type": "text",
+			"text": message,
+		}},
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal push payload: %w", err)
+	}
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", "https://api.line.me/v2/bot/message/push", bytes.NewReader(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to create push request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+channelToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send push message: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("LINE push error (%d): %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// --- Conversation Admin API Handlers ---
+
+// ConversationSummary is a lightweight view of a conversation for the list page
+type ConversationSummary struct {
+	UserID       string `json:"user_id"`
+	LastMessage  string `json:"last_message"`
+	LastSeen     string `json:"last_seen"`
+	Takeover     bool   `json:"takeover"`
+	WantsHuman   bool   `json:"wants_human"`
+	MessageCount int    `json:"message_count"`
+}
+
+func handleGetConversations(c *fiber.Ctx) error {
+	userThreadLock.Lock()
+	defer userThreadLock.Unlock()
+
+	summaries := make([]ConversationSummary, 0, len(userConversations))
+	for _, conv := range userConversations {
+		lastMsg := ""
+		if len(conv.Messages) > 0 {
+			lastMsg = conv.Messages[len(conv.Messages)-1].Text
+			if len(lastMsg) > 80 {
+				lastMsg = lastMsg[:80] + "…"
+			}
+		}
+		summaries = append(summaries, ConversationSummary{
+			UserID:       conv.UserID,
+			LastMessage:  lastMsg,
+			LastSeen:     conv.LastSeen,
+			Takeover:     conv.Takeover,
+			WantsHuman:   conv.WantsHuman,
+			MessageCount: len(conv.Messages),
+		})
+	}
+	return c.JSON(summaries)
+}
+
+func handleGetConversationMessages(c *fiber.Ctx) error {
+	userId := c.Params("userId")
+	if userId == "" {
+		return respondError(c, fiber.StatusBadRequest, "userId is required")
+	}
+
+	userThreadLock.Lock()
+	conv, ok := userConversations[userId]
+	var result UserConversation
+	if ok {
+		result = *conv // shallow copy is fine for read
+	}
+	userThreadLock.Unlock()
+
+	if !ok {
+		return respondError(c, fiber.StatusNotFound, "conversation not found")
+	}
+	return c.JSON(result)
+}
+
+func handleTakeoverConversation(c *fiber.Ctx) error {
+	userId := c.Params("userId")
+	if userId == "" {
+		return respondError(c, fiber.StatusBadRequest, "userId is required")
+	}
+
+	userThreadLock.Lock()
+	if _, ok := userConversations[userId]; !ok {
+		userConversations[userId] = &UserConversation{UserID: userId}
+	}
+	userConversations[userId].Takeover = true
+	userThreadLock.Unlock()
+
+	log.Printf("Admin took over conversation for user %s", userId)
+	return c.JSON(fiber.Map{"status": "ok", "takeover": true})
+}
+
+func handleReleaseConversation(c *fiber.Ctx) error {
+	userId := c.Params("userId")
+	if userId == "" {
+		return respondError(c, fiber.StatusBadRequest, "userId is required")
+	}
+
+	userThreadLock.Lock()
+	if conv, ok := userConversations[userId]; ok {
+		conv.Takeover = false
+		conv.WantsHuman = false
+	}
+	userThreadLock.Unlock()
+
+	log.Printf("Admin released conversation for user %s - AI resumed", userId)
+	return c.JSON(fiber.Map{"status": "ok", "takeover": false})
+}
+
+type AdminReplyRequest struct {
+	Message string `json:"message"`
+}
+
+func handleAdminReply(c *fiber.Ctx) error {
+	userId := c.Params("userId")
+	if userId == "" {
+		return respondError(c, fiber.StatusBadRequest, "userId is required")
+	}
+
+	var req AdminReplyRequest
+	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		return respondError(c, fiber.StatusBadRequest, "message is required")
+	}
+
+	if err := pushLineMessage(userId, req.Message); err != nil {
+		log.Printf("Failed to push LINE message to %s: %v", userId, err)
+		return respondError(c, fiber.StatusInternalServerError, "failed to send LINE message: "+err.Error())
+	}
+
+	// Record admin message in history
+	userThreadLock.Lock()
+	if _, ok := userConversations[userId]; !ok {
+		userConversations[userId] = &UserConversation{UserID: userId}
+	}
+	userConversations[userId].appendMessage("admin", req.Message)
+	userThreadLock.Unlock()
+
+	log.Printf("Admin replied to user %s: %s", userId, req.Message)
+	return c.JSON(fiber.Map{"status": "ok"})
 }
