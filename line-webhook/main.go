@@ -604,7 +604,19 @@ var (
 func main() {
 	// Set data file paths from DATA_DIR env var (for persistent disk on Render etc.)
 	if dir := os.Getenv("DATA_DIR"); dir != "" {
-		pricingConfigFile = filepath.Join(dir, "pricing_config.json")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("Warning: could not create DATA_DIR %s: %v", dir, err)
+		}
+		destPricing := filepath.Join(dir, "pricing_config.json")
+		// Auto-copy pricing_config.json to persistent disk on first deploy
+		if _, err := os.Stat(destPricing); os.IsNotExist(err) {
+			if src, err := os.ReadFile("pricing_config.json"); err == nil {
+				if err := os.WriteFile(destPricing, src, 0644); err == nil {
+					log.Printf("Auto-copied pricing_config.json to %s", destPricing)
+				}
+			}
+		}
+		pricingConfigFile = destPricing
 		conversationsFile = filepath.Join(dir, "conversations.json")
 		log.Printf("Data directory: %s", dir)
 	}
@@ -736,7 +748,7 @@ func main() {
 				{
 					conv := userConversations[userId]
 					conv.LastSeen = getBangkokTime()
-					if detectHumanRequest(messageContent) {
+					if detectHumanRequest(messageContent) || detectAdminAlert(messageContent) {
 						conv.WantsHuman = true
 					}
 					displayMsg := messageContent
@@ -2117,8 +2129,31 @@ func detectHumanRequest(msg string) bool {
 		"ขอเจ้าหน้าที่", "อยากคุยกับเจ้าหน้าที่",
 		"คุยกับคนได้ไหม", "มีคนตอบไหม", "ขอให้คนตอบ",
 		"คนจริงๆ", "ไม่ใช่บอท", "ไม่ใช่ai",
-		"human agent", "speak to human", "talk to human",
-		"real person",
+		"คุยกะคน", "คุยกะเจ้าหน้าที่", "คุยกะพนักงาน",
+		"ขอคุยกะ", "อยากคุยกะ", "ให้คนโทร", "ให้คนติดต่อ",
+		"human agent", "speak to human", "talk to human", "real person",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectAdminAlert returns true when the message signals a bulk/B2B order
+// that requires admin decision-making.
+// Note: special deal requests for normal quantities are handled by AI (existing promotions cover them).
+func detectAdminAlert(msg string) bool {
+	lower := strings.ToLower(msg)
+	keywords := []string{
+		// Bulk / large quantity
+		"จำนวนมาก", "หลายชิ้น", "หลายตัว", "เยอะมาก",
+		"bulk", "wholesale", "จำนวนหลาย",
+		// B2B / corporate
+		"บริษัท", "องค์กร", "โรงแรม", "รีสอร์ท", "โรงพยาบาล",
+		"สำนักงาน", "office", "corporate", "b2b", "ธุรกิจ",
+		"ในนามบริษัท", "บริษัทเรา", "ออฟฟิศ",
 	}
 	for _, kw := range keywords {
 		if strings.Contains(lower, kw) {
