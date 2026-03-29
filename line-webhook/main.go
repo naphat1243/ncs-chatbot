@@ -992,7 +992,13 @@ func dispatchFunctionCall(name string, arguments json.RawMessage, userId string)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return string(body)
+		bodyStr := strings.TrimSpace(string(body))
+		// If response is empty or clearly indicates no data, flag for admin
+		if bodyStr == "" || bodyStr == "[]" || bodyStr == "{}" || len(bodyStr) < 20 {
+			log.Printf("Slot API returned no data for %s, flagging for admin", args.ThaiMonthYear)
+			return flagSchedulingFallback(userId)
+		}
+		return bodyStr
 
 	case "get_ncs_pricing":
 		var args struct {
@@ -1184,7 +1190,7 @@ func getAssistantResponse(userId, message string) string {
 	// Loop to handle function/tool calls (Responses API is synchronous — no polling needed)
 	for iteration := 0; iteration < 10; iteration++ {
 		payload := map[string]interface{}{
-			"model":        "gpt-4.1-mini",
+			"model":        "gpt-4.1",
 			"instructions": systemInstructions,
 			"input":        inputItems,
 			"tools":        toolDefinitions,
